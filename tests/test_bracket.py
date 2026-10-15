@@ -10,6 +10,7 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -27,9 +28,9 @@ import bracket as B  # noqa: E402
 EM_DASH, EN_DASH = chr(0x2014), chr(0x2013)   # spelled as code points so this file stays clean
 
 
-def cli(*args):
+def cli(*args, cwd=None):
     return subprocess.run([sys.executable, BRACKET] + [str(a) for a in args],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, cwd=cwd)
 
 
 def write(path, text):
@@ -363,6 +364,56 @@ class FullPipelineWithFakeAgents(TempDir):
         self.assertTrue(os.path.exists(path + ".unreadable"))
 
 
+class FailedJobs(TempDir):
+    """bracket.py fail: stand-ins for a job that failed twice, by phase."""
+
+    def setUp(self):
+        super().setUp()
+        self.d = os.path.join(self.tmp, "run")
+        self.ok("init", "--agents", 2, "--seed", 1, "--task", "t", "--dir", self.d)
+        m = load(self.d)["rounds"][0]["matches"][0]
+        self.mid, self.a, self.b = m["id"], m["a"], m["b"]
+
+    def fail(self, job_id):
+        return self.ok("fail", job_id, "--dir", self.d)
+
+    def test_failed_spawn_has_no_solution(self):
+        os.makedirs(os.path.join(self.d, "r0"))
+        write(B.spawn_out(self.d, self.a), "real work")
+        self.assertIn("already has all its outputs", self.fail(self.a + ".spawn"))
+        self.fail(self.b + ".spawn")
+        self.assertEqual(read(B.spawn_out(self.d, self.a)), "real work")
+        self.assertEqual(read(B.spawn_out(self.d, self.b)), "NO OUTPUT\n")
+
+    def test_failed_attack_is_no_attacks(self):
+        os.makedirs(os.path.join(self.d, "r0"))
+        for aid in (self.a, self.b):
+            write(B.spawn_out(self.d, aid), "solution of %s" % aid)
+        self.fail("%s.%s.attack" % (self.mid, self.a))
+        self.assertEqual(read(B.attack_out(self.d, 1, self.mid, self.a)), "NO OUTPUT\n")
+
+    def test_failed_defense_keeps_the_solution(self):
+        os.makedirs(os.path.join(self.d, "r1"))
+        os.makedirs(os.path.join(self.d, "r0"))
+        for aid in (self.a, self.b):
+            write(B.spawn_out(self.d, aid), "solution of %s" % aid)
+            write(B.attack_out(self.d, 1, self.mid, aid), "ATTACK 1 [MINOR] x\n")
+        write(B.defense_out(self.d, 1, self.mid, self.a), "ATTACK 1: REBUT. no.\n")
+        self.fail("%s.%s.defend" % (self.mid, self.a))
+        self.fail("%s.%s.defend" % (self.mid, self.b))
+        self.assertEqual(read(B.defense_out(self.d, 1, self.mid, self.a)), "ATTACK 1: REBUT. no.\n")
+        self.assertEqual(read(B.defense_out(self.d, 1, self.mid, self.b)), "NO OUTPUT\n")
+        for aid in (self.a, self.b):
+            self.assertEqual(read(B.revised_out(self.d, 1, self.mid, aid)), "solution of %s" % aid)
+        self.assertIn("NEXT: judge", self.ok("next", "--dir", self.d))
+
+    def test_judges_and_unknown_jobs_are_refused(self):
+        r = cli("fail", "%s.judge" % self.mid, "--dir", self.d)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("fresh run", r.stderr)
+        self.assertEqual(cli("fail", "r9-m01.a001.attack", "--dir", self.d).returncode, 2)
+
+
 class Guards(TempDir):
     def test_init_refuses_to_overwrite_and_bad_sizes(self):
         d = os.path.join(self.tmp, "run")
@@ -378,6 +429,37 @@ class Guards(TempDir):
         self.ok("init", "--quick", "--task", "t", "--dir", d)
         self.assertEqual(load(d)["agents_n"], 16)
 
+    def test_default_is_16_and_full_is_100(self):
+        d = os.path.join(self.tmp, "sizes")
+        self.ok("init", "--task", "t", "--dir", d + "1")
+        self.assertEqual(load(d + "1")["agents_n"], 16)
+        self.ok("init", "--full", "--task", "t", "--dir", d + "2")
+        self.assertEqual(load(d + "2")["agents_n"], 100)
+        self.assertIn("16 agents, 4 rounds", self.ok("plan"))
+        self.assertIn("100 agents, 7 rounds", self.ok("plan", "--full"))
+        self.assertEqual(cli("init", "--full", "--agents", 8, "--task", "t", "--dir", d + "3").returncode, 2)
+        self.assertEqual(cli("init", "--full", "--quick", "--task", "t", "--dir", d + "4").returncode, 2)
+
+    def test_init_keeps_run_files_out_of_git(self):
+        r = cli("init", "--agents", 2, "--task", "t", cwd=self.tmp)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(read(os.path.join(self.tmp, ".arena", ".gitignore")), "*\n")
+        d = os.path.join(self.tmp, "custom")
+        self.ok("init", "--agents", 2, "--task", "t", "--dir", d)
+        self.assertEqual(read(os.path.join(d, ".gitignore")), "*\n")
+
+    def test_printed_commands_work_from_any_directory(self):
+        d = os.path.join(self.tmp, "run")
+        self.ok("init", "--agents", 2, "--task", "t", "--dir", d)
+        line = next(x for x in self.ok("next", "--dir", d).splitlines() if " prompts spawn " in x)
+        printed = shlex.split(line.split(". ", 1)[1])
+        self.assertEqual(printed[-2:], ["--dir", d])
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        os.makedirs(elsewhere)
+        r = subprocess.run([sys.executable] + printed[1:], capture_output=True, text=True, cwd=elsewhere)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("round 0, spawn: 2 job(s)", r.stdout)
+
     def test_record_rejects_an_outsider(self):
         d = os.path.join(self.tmp, "rec")
         self.ok("init", "--agents", 4, "--seed", 2, "--task", "t", "--dir", d)
@@ -386,7 +468,7 @@ class Guards(TempDir):
         self.assertEqual(cli("record", m["id"], outsider, "--dir", d).returncode, 2)
         self.assertEqual(cli("advance", "--dir", d).returncode, 2, "cannot advance with open matches")
 
-    def test_templates_are_all_in_skill_md(self):
+    def test_every_template_file_exists(self):
         self.assertEqual(sorted(B.load_templates()), sorted(B.TEMPLATES))
 
     def test_no_em_dashes_anywhere(self):

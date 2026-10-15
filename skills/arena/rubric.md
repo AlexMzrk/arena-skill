@@ -12,7 +12,7 @@ Each criterion is scored 0 to 10. The weight is how much of the 100-point total 
 | Correctness | 30 | Is it right? No false claims, no logic errors, no bugs, nothing that would mislead the user. |
 | Completeness | 25 | Does it meet every requirement the task actually states? Judged against the task text, not against what the judge would have liked. |
 | Specificity | 15 | Could the user act on it right now without guessing? Exact steps, values, names, code. |
-| Robustness | 20 | Does it hold up against the attacks raised in this match? Fixed, correctly rebutted, or still standing. |
+| Robustness | 20 | Does it hold up against every attack raised in this match, whichever side it was aimed at? Fixed, correctly rebutted, or still standing. |
 | Clarity | 10 | Is it easy to read and use, at a length that fits the task? |
 
 Weighted total = (correctness x 30 + completeness x 25 + specificity x 15 + robustness x 20 + clarity x 10) / 10.
@@ -41,12 +41,14 @@ Use the whole scale. A 7 is not a polite default.
 - 0 to 2: generic advice that would fit any task.
 
 **Robustness**
-- 10: every attack in this match is fixed in the revised solution or correctly rebutted, and nothing new is broken.
+- 10: every attack in this match that applies to it is fixed in the revised solution or correctly rebutted, and nothing new is broken.
 - 7: one MINOR attack still standing.
 - 4: a MAJOR attack still standing, or a fix that broke something else.
 - 0 to 2: a FATAL attack still standing.
 
-A missing attack file means the opponent raised nothing. Score robustness on the flaws you found yourself.
+An attack aimed at one side also counts against the other wherever it applies there: a missed
+requirement or a breaking input is a test for both solutions. A missing attack file means the
+opponent raised nothing. Score robustness on the attacks that apply and the flaws you found yourself.
 
 **Clarity**
 - 10: the shape makes it obvious how to use it. No padding.

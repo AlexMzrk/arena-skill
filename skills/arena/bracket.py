@@ -7,10 +7,11 @@ own context gets compacted halfway through a 100-agent run.
 
     python3 bracket.py plan --agents 100             # rounds, sub-agent calls and waves. Writes nothing.
     python3 bracket.py init --agents 100 --seed 7 --task-file task.md [--baseline-file old.md]
-    python3 bracket.py init --quick --task "..."     # 16 agents
+    python3 bracket.py init --full --task "..."      # 100 agents (default 16)
     python3 bracket.py next                          # what to do now, and the exact command for it
     python3 bracket.py prompts <phase>               # write the sub-agent briefs, list the jobs left, in waves
     python3 bracket.py check <phase>                 # which outputs are still missing
+    python3 bracket.py fail <job_id>                 # stand-ins for a job that failed twice (never a judge)
     python3 bracket.py pairings                      # this round's matches, including the bye
     python3 bracket.py collect                       # read every judge verdict and record the winners
     python3 bracket.py record <match_id> <winner_id> [--reason "..."]
@@ -37,11 +38,12 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 SELF = os.path.abspath(__file__)
 STRATEGIES_PATH = os.path.join(HERE, "strategies.json")
-SKILL_PATH = os.path.join(HERE, "SKILL.md")
+TEMPLATES_DIR = os.path.join(HERE, "templates")
 RUBRIC_PATH = os.path.join(HERE, "rubric.md")
 
-DEFAULT_AGENTS = 100
 QUICK_AGENTS = 16
+FULL_AGENTS = 100
+DEFAULT_AGENTS = QUICK_AGENTS
 DEFAULT_WAVE = 10          # Claude Code runs at most 10 tool calls at once by default
 ROOT = ".arena"
 LATEST = "LATEST"
@@ -640,17 +642,48 @@ def missing_jobs(jobs):
     return [j for j in jobs if not all(_has_output(p) for p in j["outputs"])]
 
 
-_TEMPLATE_RE = re.compile(r"<!-- template:([a-z]+) -->\s*```text\n(.*?)\n```\s*<!-- /template:\1 -->", re.S)
+def fail_job(state, job_id):
+    """Write stand-ins for the missing outputs of a job that failed twice, so the arena
+    can move on. A failed defense keeps the solution as it was. Judges are refused:
+    a match is only ever decided by a judge. Returns (job, paths written)."""
+    job = None
+    for phase in ("spawn", "attack", "defend"):
+        job = next((j for j in phase_jobs(state, phase) if j["id"] == job_id), None)
+        if job:
+            break
+    if job is None:
+        if any(j["id"] == job_id for phase in ("judge", "final") for j in phase_jobs(state, phase)):
+            raise ArenaError("%s is a judge. Never decide a match yourself: give it a fresh run" % job_id)
+        raise ArenaError("no open job called '%s'" % job_id)
+    written = []
+    for i, path in enumerate(job["outputs"]):
+        if _has_output(path):
+            continue
+        body = "NO OUTPUT\n"
+        if job["kind"] == "defender" and i == 1:
+            with open(state["agents"][job["agent"]]["solution"], encoding="utf-8", errors="replace") as fh:
+                body = fh.read()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        written.append(path)
+    return job, written
+
+
 _PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 
 
-def load_templates(path=SKILL_PATH):
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
-    found = {m.group(1): m.group(2) for m in _TEMPLATE_RE.finditer(text)}
-    missing = [t for t in TEMPLATES if t not in found]
+def load_templates(folder=TEMPLATES_DIR):
+    found, missing = {}, []
+    for name in TEMPLATES:
+        path = os.path.join(folder, name + ".md")
+        if not os.path.isfile(path):
+            missing.append(name)
+            continue
+        with open(path, encoding="utf-8") as fh:
+            found[name] = fh.read().rstrip("\n")
     if missing:
-        raise ArenaError("SKILL.md is missing prompt templates: %s" % ", ".join(missing))
+        raise ArenaError("%s is missing prompt templates: %s" % (folder, ", ".join(missing)))
     return found
 
 
@@ -824,8 +857,8 @@ def save_state(state):
     os.replace(tmp, path)
 
 
-def _cmd(*parts):
-    return 'python3 "%s" %s' % (SELF, " ".join(parts))
+def _cmd(run_dir, *parts):
+    return 'python3 "%s" %s --dir "%s"' % (SELF, " ".join(parts), run_dir)
 
 
 def _card_line(card):
@@ -835,8 +868,10 @@ def _card_line(card):
 # ---------------------------------------------------------------- commands
 
 def _agents_arg(args):
-    if args.quick and args.agents is not None:
-        raise ArenaError("pass --quick or --agents, not both")
+    if sum((args.quick, args.full, args.agents is not None)) > 1:
+        raise ArenaError("pass only one of --quick, --full and --agents")
+    if args.full:
+        return FULL_AGENTS
     if args.quick:
         return QUICK_AGENTS
     return DEFAULT_AGENTS if args.agents is None else args.agents
@@ -891,6 +926,11 @@ def cmd_init(args):
     if os.path.exists(os.path.join(d, STATE_FILE)):
         raise ArenaError("%s already has an arena in it. Pick another --dir" % d)
     os.makedirs(d, exist_ok=True)
+    # Keeps hundreds of run files out of the user's git status.
+    ignore = os.path.join(ROOT if default_dir else d, ".gitignore")
+    if not os.path.exists(ignore):
+        with open(ignore, "w", encoding="utf-8") as fh:
+            fh.write("*\n")
     with open(os.path.join(d, "task.md"), "w", encoding="utf-8") as fh:
         fh.write(task + "\n")
     if baseline:
@@ -914,7 +954,7 @@ def cmd_init(args):
     print("%d rounds (%s). %d sub-agent calls in %d waves of %d%s."
           % (t["rounds"], " -> ".join(str(s) for s in bracket_sizes(n)), t["calls"] + (1 if baseline else 0),
              t["waves"] + (1 if baseline else 0), args.wave, ", including the final check" if baseline else ""))
-    print("next: %s" % _cmd("next"))
+    print("next: %s" % _cmd(state["dir"], "next"))
     return 0
 
 
@@ -931,17 +971,17 @@ def cmd_next(args):
         print("champion: %s after %d round(s)" % (state["champion"], rounds_played(state)))
     if phase in PHASES:
         print("NEXT: %s. %d of %d job(s) to run." % (phase, len(left), len(jobs)))
-        print("  1. %s" % _cmd("prompts", phase))
+        print("  1. %s" % _cmd(state["dir"], "prompts", phase))
         print("  2. launch the jobs it lists, one wave of %d at a time" % state["wave"])
-        print("  3. %s" % _cmd("next"))
+        print("  3. %s" % _cmd(state["dir"], "next"))
     elif phase == "collect":
         print("NEXT: collect. Every verdict for this step is on disk.")
-        print("  %s" % _cmd("collect"))
+        print("  %s" % _cmd(state["dir"], "collect"))
     elif phase == "advance":
         print("NEXT: advance. Every match in round %d has a winner." % rd["n"])
-        print("  %s" % _cmd("advance"))
+        print("  %s" % _cmd(state["dir"], "advance"))
     else:
-        print("DONE. %s" % _cmd("winner"))
+        print("DONE. %s" % _cmd(state["dir"], "winner"))
     return 0
 
 
@@ -949,7 +989,7 @@ def cmd_prompts(args):
     state = load_state(args)
     jobs = write_prompts(state, args.phase)
     if not jobs:
-        print("nothing to run for %s right now. %s" % (args.phase, _cmd("next")))
+        print("nothing to run for %s right now. %s" % (args.phase, _cmd(state["dir"], "next")))
         return 0
     left = missing_jobs(jobs)
     w = state["wave"]
@@ -967,7 +1007,7 @@ def cmd_prompts(args):
         print("Each job is one Agent call: subagent_type general-purpose, description \"arena <job id>\",")
         print("prompt \"Read <prompt path> and follow it exactly. It is your whole brief.\"")
         print("A wave is one message with all of its Agent calls. Let it finish before the next wave.")
-    print("then: %s" % _cmd("next"))
+    print("then: %s" % _cmd(state["dir"], "next"))
     return 0
 
 
@@ -980,6 +1020,17 @@ def cmd_check(args):
         gone = [p for p in j["outputs"] if not _has_output(p)]
         print("  missing %-26s %s" % (j["id"], ", ".join(gone)))
     return 1 if left else 0
+
+
+def cmd_fail(args):
+    state = load_state(args)
+    job, written = fail_job(state, args.job_id.strip().lower())
+    if not written:
+        print("%s already has all its outputs." % job["id"])
+    for path in written:
+        print("  stand-in %s" % path)
+    print("then: %s" % _cmd(state["dir"], "next"))
+    return 0
 
 
 def cmd_pairings(args):
@@ -1021,7 +1072,7 @@ def cmd_collect(args):
     results = collect(state)
     save_state(state)
     if not results:
-        print("nothing to collect. %s" % _cmd("next"))
+        print("nothing to collect. %s" % _cmd(state["dir"], "next"))
         return 0
     bad = 0
     for mid, what, note in results:
@@ -1033,9 +1084,9 @@ def cmd_collect(args):
         done = sum(1 for m in rd["matches"] if m["winner"])
         print("round %d: %d of %d match(es) recorded" % (rd["n"], done, len(rd["matches"])))
     if bad:
-        print("%d verdict(s) missing or unreadable. Re-run those judges: %s" % (bad, _cmd("next")))
+        print("%d verdict(s) missing or unreadable. Re-run those judges: %s" % (bad, _cmd(state["dir"], "next")))
         return 1
-    print("then: %s" % _cmd("next"))
+    print("then: %s" % _cmd(state["dir"], "next"))
     return 0
 
 
@@ -1048,11 +1099,11 @@ def cmd_advance(args):
     print("round %s closed: %d through, %d eliminated"
           % (closing, len(survivors), len(rd["matches"])))
     if state["champion"]:
-        print("CHAMPION: %s. %s" % (state["champion"], _cmd("next")))
+        print("CHAMPION: %s. %s" % (state["champion"], _cmd(state["dir"], "next")))
     else:
         nr = state["rounds"][-1]
         print("round %d open: %d match(es)%s. %s"
-              % (nr["n"], len(nr["matches"]), ", bye %s" % nr["bye"] if nr["bye"] else "", _cmd("next")))
+              % (nr["n"], len(nr["matches"]), ", bye %s" % nr["bye"] if nr["bye"] else "", _cmd(state["dir"], "next")))
     return 0
 
 
@@ -1118,7 +1169,7 @@ def cmd_winner(args):
     if rep is None:
         rd = current_round(state)
         print("no winner yet: round %s, %d alive. %s"
-              % (rd["n"] if rd else "?", len(alive_ids(state)), _cmd("next")))
+              % (rd["n"] if rd else "?", len(alive_ids(state)), _cmd(state["dir"], "next")))
         return 1
     if args.json:
         print(json.dumps(rep, indent=1))
@@ -1168,13 +1219,15 @@ def build_parser():
     s = sub.add_parser("plan", help="rounds, sub-agent calls and waves for N agents")
     s.add_argument("--agents", type=int)
     s.add_argument("--quick", action="store_true")
+    s.add_argument("--full", action="store_true")
     s.add_argument("--wave", type=int, default=DEFAULT_WAVE)
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_plan)
 
     s = sub.add_parser("init", parents=[common], help="deal the cards and write arena.json")
     s.add_argument("--agents", type=int, help="number of competitors (default %d)" % DEFAULT_AGENTS)
-    s.add_argument("--quick", action="store_true", help="%d competitors" % QUICK_AGENTS)
+    s.add_argument("--quick", action="store_true", help="%d competitors, the default" % QUICK_AGENTS)
+    s.add_argument("--full", action="store_true", help="%d competitors" % FULL_AGENTS)
     s.add_argument("--seed", type=int, help="fixes the cards and the pairings (default: random, recorded)")
     s.add_argument("--task-file", help="the task, word for word, as every competitor will get it")
     s.add_argument("--task", help="the task as a string, instead of --task-file")
@@ -1190,6 +1243,10 @@ def build_parser():
         s = sub.add_parser(name, parents=[common], help=hlp)
         s.add_argument("phase", choices=PHASES)
         s.set_defaults(func=fn)
+
+    s = sub.add_parser("fail", parents=[common], help="write stand-ins for a job that failed twice")
+    s.add_argument("job_id")
+    s.set_defaults(func=cmd_fail)
 
     s = sub.add_parser("pairings", parents=[common], help="this round's matches, including the bye")
     s.add_argument("--json", action="store_true")

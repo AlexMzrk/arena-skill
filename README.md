@@ -4,11 +4,11 @@ When Claude keeps giving you bad answers, make 100 versions of it fight to the d
 Code skill. Free, MIT, no signup, no API key, nothing to connect.
 
 You use it when you are not happy with what Claude gave you. Instead of asking again and again,
-`/arena` spins up 100 sub-agents and gives every one of them the exact same task, word for word.
-Each one gets a different strategy card: a way of reasoning, a workflow and a strategy, so each one
-attacks the task differently. Then they pair off. Each attacks the other's solution, each defends
-and revises its own, and a judge scores the match on a written rubric. The loser is out. 100
-becomes 50, then 25, 13, 7, 4, 2, 1.
+`/arena` spins up 16 sub-agents, or 100 with `--full`, and gives every one of them the exact same
+task, word for word. Each one gets a different strategy card: a way of reasoning, a workflow and a
+strategy, so each one attacks the task differently. Then they pair off. Each attacks the other's
+solution, each defends and revises its own, and a judge scores the match on a written rubric. The
+loser is out. In a full run, 100 becomes 50, then 25, 13, 7, 4, 2, 1.
 
 What comes back is the one solution that survived, the attacks it beat on the way, and how many
 rounds it took.
@@ -62,8 +62,9 @@ answer, make them compete". When it starts itself like that, it asks before it s
 
 | flag | what it does |
 | --- | --- |
-| `--agents N` | N competitors. Default 100. |
-| `--quick` | 16 competitors. The everyday setting. |
+| `--agents N` | N competitors. Default 16. |
+| `--full` | 100 competitors. For the answer that matters. |
+| `--quick` | 16 competitors, the same as the default. |
 | `--seed S` | Same seed, same cards and same bracket. Default random, and recorded. |
 | `--wave W` | Sub-agents per wave. Default 10. Only raise it if you raised Claude Code's limit. |
 
@@ -82,9 +83,10 @@ answer, make them compete". When it starts itself like that, it asks before it s
    labelled FATAL, MAJOR or MINOR.
 3. **Defend.** Each side answers every attack it took, conceding or rebutting with evidence, then
    rewrites its solution to fix everything it conceded.
-4. **Judge.** A separate judge sub-agent reads both revised solutions, checks every attack itself,
-   and scores both on [the rubric](skills/arena/rubric.md): correctness 30, completeness against the
-   task 25, robustness to the attacks raised 20, specificity 15, clarity 10. The judge never sees
+4. **Judge.** A separate judge sub-agent reads both revised solutions, checks every attack itself
+   against both of them, and scores both on [the rubric](skills/arena/rubric.md): correctness 30,
+   completeness against the task 25, robustness to the attacks raised 20, specificity 15, clarity
+   10. The judge never sees
    the cards. `bracket.py` does the arithmetic: the higher total goes through, and a solution with a
    verified fatal flaw cannot beat one without. The loser is out.
 5. **Repeat.** The survivors carry their revised solutions into the next round. An odd number means
@@ -93,7 +95,7 @@ answer, make them compete". When it starts itself like that, it asks before it s
    If you started from an answer you rejected, a last judge compares the winner with it blind and
    the skill tells you the score, even when the old answer wins.
 
-The 100-agent bracket, from `python3 skills/arena/bracket.py plan`:
+The 100-agent bracket, from `python3 skills/arena/bracket.py plan --full`:
 
 ```
   round  alive  matches  bye  sub-agent calls  waves
@@ -122,15 +124,15 @@ The skill is free. The tokens are yours, and 100 agents is a lot of them.
 
 | agents | rounds | sub-agent calls | waves of 10 |
 | --- | --- | --- | --- |
-| 100, the default | 7 | 595 | 70 |
+| 100, `--full` | 7 | 595 | 70 |
 | 64 | 6 | 379 | 49 |
 | 32 | 5 | 187 | 28 |
-| 16, `--quick` | 4 | 91 | 16 |
+| 16, the default | 4 | 91 | 16 |
 | 8 | 3 | 43 | 10 |
 
 Add one call when there is a rejected answer to beat. Every call reads the task and one or two
-solutions, so the bill grows with the size of the task. Use `--quick` or `--agents 16` for
-everyday things and save the full 100 for the answer that matters. The skill prints these numbers
+solutions, so the bill grows with the size of the task. The default 16 covers everyday things.
+Save `--full` for the answer that matters. The skill prints these numbers
 before it starts, and `python3 skills/arena/bracket.py plan --agents N` prints them any time.
 
 ## The tool
@@ -142,6 +144,7 @@ python3 bracket.py plan --agents 100        # rounds, calls, waves. Writes nothi
 python3 bracket.py init --agents 100 --seed 7 --task-file task.md [--baseline-file old.md]
 python3 bracket.py next                     # what to do now, with the exact command
 python3 bracket.py prompts attack           # write every sub-agent brief, list the jobs in waves
+python3 bracket.py fail r2-m03.a017.defend  # stand-ins for a job that failed twice (never a judge)
 python3 bracket.py pairings                 # this round's matches, including the bye
 python3 bracket.py collect                  # record the judges' verdicts
 python3 bracket.py record r3-m07 a042 --reason "..."   # or record one by hand
@@ -188,7 +191,8 @@ and in the default permission mode that is one approval per file. Run it in acce
 `.arena/<run>/task.md` if you want to check.
 
 **It never edits your project.** Code changes come back as a diff or as full files inside the
-winning answer. Applying them is your call, and the skill asks.
+winning answer. Applying them is your call, and the skill asks. `.arena/` gets its own
+`.gitignore`, so the run files stay out of `git status`.
 
 **The same seed gives the same cards and the same bracket.** Not the same answers. The model is not
 deterministic.
@@ -198,7 +202,8 @@ deterministic.
 ## Files
 
 ```
-skills/arena/SKILL.md          the orchestration steps and the exact brief every sub-agent gets
+skills/arena/SKILL.md          the orchestration steps
+skills/arena/templates/        the exact brief every sub-agent gets, one file per role
 skills/arena/bracket.py        the tournament state machine, standard library only
 skills/arena/strategies.json   15 reasoning modes, 12 workflows, 12 strategies. Edit freely
 skills/arena/rubric.md         the five criteria every judge scores on
