@@ -25,6 +25,7 @@ sys.path.insert(0, SKILL)
 
 import bracket as B  # noqa: E402
 
+W = B.load_weights(B.RUBRIC_PATH)
 EM_DASH, EN_DASH = chr(0x2014), chr(0x2013)   # spelled as code points so this file stays clean
 
 
@@ -206,46 +207,60 @@ class Plan(unittest.TestCase):
     def test_numbers(self):
         self.assertEqual(B.bracket_sizes(100), [100, 50, 25, 13, 7, 4, 2, 1])
         t = B.plan_totals(100)
-        self.assertEqual((t["rounds"], t["calls"], t["waves"]), (7, 595, 70))
+        self.assertEqual((t["rounds"], t["calls"], t["waves"]), (7, 601, 70))
         t = B.plan_totals(16)
-        self.assertEqual((t["rounds"], t["calls"], t["waves"]), (4, 91, 16))
+        self.assertEqual((t["rounds"], t["calls"], t["waves"]), (4, 97, 16))
+
+    def test_panel_in_the_last_two_rounds(self):
+        self.assertEqual([B.judges_in(100, r) for r in range(1, 8)], [1, 1, 1, 1, 1, 3, 3])
+        self.assertEqual([B.judges_in(16, r) for r in range(1, 5)], [1, 1, 3, 3])
+        self.assertEqual(B.judges_in(2, 1), 3)
 
 
 class Verdicts(unittest.TestCase):
     def scores(self, c, m, s, r, cl, fatal=False):
         return {"correctness": c, "completeness": m, "specificity": s, "robustness": r, "clarity": cl, "fatal": fatal}
 
-    def test_weights_match_the_rubric(self):
-        with open(os.path.join(SKILL, "rubric.md"), encoding="utf-8") as fh:
-            rows = re.findall(r"^\| (\w+) \| (\d+) \|", fh.read(), re.M)
-        self.assertEqual([(k.lower(), int(w)) for k, w in rows], list(B.WEIGHTS))
-        self.assertEqual(sum(w for _, w in B.WEIGHTS), 100)
+    def test_weights_come_from_the_rubric_table(self):
+        self.assertEqual(W, [("correctness", 30), ("completeness", 25), ("specificity", 15),
+                             ("robustness", 20), ("clarity", 10)])
+        creative = B.load_weights(B.rubric_path("creative"))
+        self.assertEqual([k for k, _ in creative], ["fit", "impact", "distinctiveness", "robustness", "clarity"])
+        self.assertEqual(sum(w for _, w in creative), 100)
+
+    def test_tie_goes_to_the_heaviest_criterion(self):
+        creative = B.load_weights(B.rubric_path("creative"))
+        rest = {"distinctiveness": 7, "robustness": 7, "clarity": 7}
+        v = {"scores": {"a001": dict(rest, fit=5, impact=10), "a002": dict(rest, fit=10, impact=4)}}
+        w, totals, _ = B.decide(v, "a001", "a002", creative)
+        self.assertEqual(totals["a001"], totals["a002"])
+        self.assertEqual(w, "a002")
 
     def test_total(self):
-        self.assertEqual(B.weighted_total(self.scores(10, 10, 10, 10, 10)), 100.0)
-        self.assertEqual(B.weighted_total(self.scores(8, 6, 7, 5, 9)), 68.5)   # (240 + 150 + 105 + 100 + 90) / 10
-        self.assertIsNone(B.weighted_total({"correctness": 8}))
+        self.assertEqual(B.weighted_total(self.scores(10, 10, 10, 10, 10), W), 100.0)
+        self.assertEqual(B.weighted_total(self.scores(8, 6, 7, 5, 9), W), 68.5)   # (240 + 150 + 105 + 100 + 90) / 10
+        self.assertIsNone(B.weighted_total({"correctness": 8}, W))
 
     def test_scores_beat_the_judges_pick(self):
         v = {"scores": {"a001": self.scores(5, 5, 5, 5, 5), "a002": self.scores(8, 8, 8, 8, 8)}, "winner": "a001"}
-        w, totals, note = B.decide(v, "a001", "a002")
+        w, totals, note = B.decide(v, "a001", "a002", W)
         self.assertEqual(w, "a002")
         self.assertIn("scores win", note)
 
     def test_fatal_rule(self):
         v = {"scores": {"a001": self.scores(9, 9, 9, 9, 9, fatal=True), "a002": self.scores(4, 4, 4, 4, 4)}}
-        self.assertEqual(B.decide(v, "a001", "a002")[0], "a002")
+        self.assertEqual(B.decide(v, "a001", "a002", W)[0], "a002")
 
     def test_tie_goes_to_fewer_standing_attacks(self):
         v = {"scores": {"a001": self.scores(7, 7, 7, 7, 7), "a002": self.scores(7, 7, 7, 7, 7)},
              "standing": {"a001": ["x", "y"], "a002": ["z"]}}
-        self.assertEqual(B.decide(v, "a001", "a002")[0], "a002")
+        self.assertEqual(B.decide(v, "a001", "a002", W)[0], "a002")
 
     def test_incomplete_scores_fall_back_to_the_pick(self):
         v = {"scores": {"a001": {"correctness": 3}}, "winner": "a001"}
-        self.assertEqual(B.decide(v, "a001", "a002")[0], "a001")
+        self.assertEqual(B.decide(v, "a001", "a002", W)[0], "a001")
         with self.assertRaises(B.ArenaError):
-            B.decide({"scores": {}}, "a001", "a002")
+            B.decide({"scores": {}}, "a001", "a002", W)
 
     def test_json_inside_a_code_fence(self):
         self.assertEqual(B.extract_json('```json\n{"winner": "a001"}\n```'), {"winner": "a001"})
@@ -271,12 +286,12 @@ class FullPipelineWithFakeAgents(TempDir):
                 write(j["outputs"][1], "Salt on the long wind, revised by %s." % j["agent"])
             elif phase == "judge":
                 a, b = j["a"], j["b"]
-                s = lambda: {k: rng.randint(3, 10) for k, _ in B.WEIGHTS}
+                s = lambda: {k: rng.randint(3, 10) for k, _ in state["weights"]}
                 v = {"match": j["match"], "scores": {a: s(), b: s()}, "winner": a, "reason": "fake",
                      "survived": ["too short"], "standing": {a: [], b: []}}
                 write(j["outputs"][0], json.dumps(v))
             elif phase == "final":
-                v = {"scores": {"X": {k: 8 for k, _ in B.WEIGHTS}, "Y": {k: 4 for k, _ in B.WEIGHTS}},
+                v = {"scores": {"X": {k: 8 for k, _ in state["weights"]}, "Y": {k: 4 for k, _ in state["weights"]}},
                      "winner": "X", "reason": "fake", "fixed": ["salt"]}
                 write(j["outputs"][0], json.dumps(v))
 
@@ -354,7 +369,7 @@ class FullPipelineWithFakeAgents(TempDir):
         self.ok("init", "--agents", 2, "--seed", 1, "--task", "t", "--dir", d)
         state = load(d)
         m = state["rounds"][0]["matches"][0]
-        path = B.verdict_out(d, 1, m["id"])
+        path = B.verdict_out(d, 1, m["id"], 1)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         write(path, "the judge rambled and wrote no json")
         r = cli("collect", "--dir", d)
@@ -408,10 +423,87 @@ class FailedJobs(TempDir):
         self.assertIn("NEXT: judge", self.ok("next", "--dir", self.d))
 
     def test_judges_and_unknown_jobs_are_refused(self):
-        r = cli("fail", "%s.judge" % self.mid, "--dir", self.d)
+        r = cli("fail", "%s.judge1" % self.mid, "--dir", self.d)
         self.assertEqual(r.returncode, 2)
         self.assertIn("fresh run", r.stderr)
         self.assertEqual(cli("fail", "r9-m01.a001.attack", "--dir", self.d).returncode, 2)
+
+
+class Panel(TempDir):
+    """The last rounds: three judges per match, alternating order, majority wins."""
+
+    def setUp(self):
+        super().setUp()
+        self.d = os.path.join(self.tmp, "run")
+        self.ok("init", "--agents", 2, "--seed", 1, "--task", "t", "--dir", self.d)
+        m = load(self.d)["rounds"][0]["matches"][0]
+        self.mid, self.a, self.b = m["id"], m["a"], m["b"]
+        os.makedirs(os.path.join(self.d, "r1"))
+
+    def verdict(self, k, high, low):
+        s = lambda x: {c: x for c, _ in W}
+        write(B.verdict_out(self.d, 1, self.mid, k),
+              json.dumps({"scores": {high: s(8), low: s(5)}, "winner": high, "reason": "judge %d" % k}))
+
+    def test_judges_alternate_who_is_read_first(self):
+        jobs = B.phase_jobs(load(self.d), "judge")
+        self.assertEqual([j["id"] for j in jobs], ["%s.judge%d" % (self.mid, k) for k in (1, 2, 3)])
+        self.assertEqual([(j["a"], j["b"]) for j in jobs],
+                         [(self.a, self.b), (self.b, self.a), (self.a, self.b)])
+
+    def test_majority_wins_and_totals_are_averaged(self):
+        self.verdict(1, self.b, self.a)
+        self.verdict(2, self.a, self.b)
+        self.verdict(3, self.a, self.b)
+        out = self.ok("collect", "--dir", self.d)
+        self.assertIn("(panel 2-1)", out)
+        m = load(self.d)["rounds"][0]["matches"][0]
+        self.assertEqual((m["winner"], m["source"], m["reason"]), (self.a, "panel 2-1", "judge 2"))
+        self.assertEqual(m["scores"], {self.a: 70.0, self.b: 60.0})
+
+    def test_a_missing_panel_verdict_holds_the_match(self):
+        self.verdict(1, self.a, self.b)
+        self.verdict(2, self.a, self.b)
+        r = cli("collect", "--dir", self.d)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("%s.judge3" % self.mid, r.stdout)
+        self.assertIsNone(load(self.d)["rounds"][0]["matches"][0]["winner"])
+
+
+class Rubrics(TempDir):
+    def judge_brief(self, *rubric):
+        d = os.path.join(self.tmp, "run" + "".join(rubric))
+        self.ok("init", "--agents", 2, "--seed", 1, "--task", "t", "--dir", d, *rubric)
+        self.ok("prompts", "judge", "--dir", d)
+        mid = load(d)["rounds"][0]["matches"][0]["id"]
+        return d, read(B.prompt_path(d, 1, mid + ".judge1"))
+
+    def test_default_rubric_brief(self):
+        d, brief = self.judge_brief()
+        blank = '{"correctness": 0, "completeness": 0, "specificity": 0, "robustness": 0, "clarity": 0, "fatal": false}'
+        self.assertEqual(brief.count(blank), 2)
+        self.assertEqual(load(d)["rubric"], "default")
+
+    def test_creative_rubric_is_copied_and_scored(self):
+        d, brief = self.judge_brief("--rubric", "creative")
+        self.assertIn('{"fit": 0, "impact": 0, "distinctiveness": 0, "robustness": 0, "clarity": 0, "fatal": false}', brief)
+        self.assertNotIn("correctness", brief)
+        self.assertEqual(read(os.path.join(d, "rubric.md")), read(B.rubric_path("creative")))
+        self.assertEqual(load(d)["weights"], [list(kw) for kw in B.load_weights(B.rubric_path("creative"))])
+
+    def test_unknown_rubric_is_refused(self):
+        r = cli("init", "--agents", 2, "--task", "t", "--rubric", "nope", "--dir", os.path.join(self.tmp, "x"))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("creative", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "x")), "nothing is created for a bad rubric")
+
+    def test_bad_weights_are_refused(self):
+        bad = os.path.join(self.tmp, "bad.md")
+        for table in ("| A | 50 | q |\n| B | 40 | q |\n", "| A | 50 | q |\n| A | 50 | q |\n",
+                      "| A | 50 | q |\n| Fatal | 50 | q |\n", "no table\n"):
+            write(bad, table)
+            with self.assertRaises(B.ArenaError):
+                B.load_weights(bad)
 
 
 class Guards(TempDir):
@@ -470,6 +562,16 @@ class Guards(TempDir):
 
     def test_every_template_file_exists(self):
         self.assertEqual(sorted(B.load_templates()), sorted(B.TEMPLATES))
+
+    def test_worker_agent_cannot_edit(self):
+        text = read(os.path.join(REPO, "agents", "arena-worker.md"))
+        front = text.split("---\n")[1]
+        self.assertIn("name: arena-worker\n", front)
+        tools = re.search(r"^tools: (.*)$", front, re.M).group(1).split(", ")
+        self.assertIn("Write", tools)
+        self.assertNotIn("Edit", tools)
+        self.assertNotIn("NotebookEdit", tools)
+        self.assertIn("arena-skill:arena-worker", read(os.path.join(SKILL, "SKILL.md")))
 
     def test_no_em_dashes_anywhere(self):
         for root, dirs, files in os.walk(REPO):

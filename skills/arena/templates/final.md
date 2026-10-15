@@ -20,8 +20,8 @@ How to judge:
 Write this JSON, and nothing else, to {{out}}:
 {
   "scores": {
-    "X": {"correctness": 0, "completeness": 0, "specificity": 0, "robustness": 0, "clarity": 0, "fatal": false},
-    "Y": {"correctness": 0, "completeness": 0, "specificity": 0, "robustness": 0, "clarity": 0, "fatal": false}
+    "X": {{scores_blank}},
+    "Y": {{scores_blank}}
   },
   "winner": "X or Y",
   "reason": "one sentence: the decisive difference",

@@ -31,6 +31,7 @@ Or copy the folder yourself, in Claude Code:
 ```bash
 git clone https://github.com/Jakeschincariol/arena-skill.git
 cp -r arena-skill/skills/arena ~/.claude/skills/
+mkdir -p ~/.claude/agents && cp arena-skill/agents/arena-worker.md ~/.claude/agents/
 ```
 
 Or as a plugin:
@@ -42,7 +43,8 @@ Or as a plugin:
 
 Claude Code namespaces plugin skills, so installed as a plugin it shows up as `/arena-skill:arena`.
 Copy the folder instead if you want plain `/arena`. Project-local instead of global: copy the same
-folder into your repo's `.claude/skills/`.
+folder into your repo's `.claude/skills/`, and the agent file into `.claude/agents/`. The agent file
+is optional: without it the arena runs on general-purpose sub-agents, which can also edit files.
 
 It needs Claude Code, because it spawns sub-agents with the Agent tool, and Python 3.8 or newer.
 Nothing to pip install.
@@ -51,7 +53,7 @@ Nothing to pip install.
 
 ```
 /arena
-/arena --quick write the headline for our pricing page
+/arena --rubric creative write the headline for our pricing page
 /arena --agents 32 fix the flaky test in tests/test_api.py
 /arena --seed 7 plan my launch week, I have 6 hours a day
 ```
@@ -65,6 +67,7 @@ answer, make them compete". When it starts itself like that, it asks before it s
 | `--agents N` | N competitors. Default 16. |
 | `--full` | 100 competitors. For the answer that matters. |
 | `--quick` | 16 competitors, the same as the default. |
+| `--rubric creative` | Score on fit, impact and distinctiveness instead of correctness. For copy, names, headlines. |
 | `--seed S` | Same seed, same cards and same bracket. Default random, and recorded. |
 | `--wave W` | Sub-agents per wave. Default 10. Only raise it if you raised Claude Code's limit. |
 
@@ -86,9 +89,13 @@ answer, make them compete". When it starts itself like that, it asks before it s
 4. **Judge.** A separate judge sub-agent reads both revised solutions, checks every attack itself
    against both of them, and scores both on [the rubric](skills/arena/rubric.md): correctness 30,
    completeness against the task 25, robustness to the attacks raised 20, specificity 15, clarity
-   10. The judge never sees
-   the cards. `bracket.py` does the arithmetic: the higher total goes through, and a solution with a
-   verified fatal flaw cannot beat one without. The loser is out.
+   10. The judge never sees the cards. `bracket.py` reads the weights from the rubric and does the
+   arithmetic: the higher total goes through, and a solution with a verified fatal flaw cannot beat
+   one without. The loser is out. In the last two rounds, where one wrong verdict costs the most,
+   three judges score each match, reading the two solutions in alternating order, and the majority
+   decides. For taste tasks, `--rubric creative` swaps in
+   [a rubric](skills/arena/rubric-creative.md) that rewards fit, impact and distinctiveness, so the
+   safest, blandest answer does not win just because it gives attackers the least to hit.
 5. **Repeat.** The survivors carry their revised solutions into the next round. An odd number means
    one bye, never to the same agent twice while anyone else is waiting for one.
 6. **Result.** One solution left. You get it, the attacks it survived, its card and the round count.
@@ -105,9 +112,9 @@ The 100-agent bracket, from `python3 skills/arena/bracket.py plan --full`:
       3     25       12  yes               60      8
       4     13        6  yes               30      5
       5      7        3  yes               15      3
-      6      4        2    -               10      3
-      7      2        1    -                5      3
-  total                                 595     70
+      6      4        2    -               14      3
+      7      2        1    -                7      3
+  total                                 601     70
 
   alive per round: 100 -> 50 -> 25 -> 13 -> 7 -> 4 -> 2 -> 1
 ```
@@ -124,16 +131,15 @@ The skill is free. The tokens are yours, and 100 agents is a lot of them.
 
 | agents | rounds | sub-agent calls | waves of 10 |
 | --- | --- | --- | --- |
-| 100, `--full` | 7 | 595 | 70 |
-| 64 | 6 | 379 | 49 |
-| 32 | 5 | 187 | 28 |
-| 16, the default | 4 | 91 | 16 |
-| 8 | 3 | 43 | 10 |
+| 100, `--full` | 7 | 601 | 70 |
+| 64 | 6 | 385 | 49 |
+| 32 | 5 | 193 | 28 |
+| 16, the default | 4 | 97 | 16 |
+| 8 | 3 | 49 | 10 |
 
 Add one call when there is a rejected answer to beat. Every call reads the task and one or two
 solutions, so the bill grows with the size of the task. The default 16 covers everyday things.
-Save `--full` for the answer that matters. The skill prints these numbers
-before it starts, and `python3 skills/arena/bracket.py plan --agents N` prints them any time.
+Save `--full` for the answer that matters. The skill prints these numbers before it starts, and `python3 skills/arena/bracket.py plan --agents N` prints them any time.
 
 ## The tool
 
@@ -141,7 +147,7 @@ before it starts, and `python3 skills/arena/bracket.py plan --agents N` prints t
 
 ```bash
 python3 bracket.py plan --agents 100        # rounds, calls, waves. Writes nothing
-python3 bracket.py init --agents 100 --seed 7 --task-file task.md [--baseline-file old.md]
+python3 bracket.py init --agents 100 --seed 7 --task-file task.md [--baseline-file old.md] [--rubric creative]
 python3 bracket.py next                     # what to do now, with the exact command
 python3 bracket.py prompts attack           # write every sub-agent brief, list the jobs in waves
 python3 bracket.py fail r2-m03.a017.defend  # stand-ins for a job that failed twice (never a judge)
@@ -170,7 +176,7 @@ up to 144 agents, no two agents even share two of their three parts.
 
 **A competitor is its card plus its solution file.** Sub-agents do not remember anything between
 calls, so when competitor a017 attacks in round 3, that is a fresh sub-agent handed a017's card and
-a017's latest solution. 100 competitors, 595 calls.
+a017's latest solution. 100 competitors, 601 calls.
 
 **"The best answer" means the one that survived every match.** The judges are Claude too, scoring
 against a written rubric that is in this repo for you to read and change. What you get is the
@@ -182,9 +188,11 @@ default (the `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY` setting), so the arena runs 
 spawn is 10 waves, the whole 100-agent run is 70, and it takes a while. If you raise that limit,
 pass `--wave` to match.
 
-**Expect permission prompts unless you allow edits.** Every sub-agent writes a file into `.arena/`,
-and in the default permission mode that is one approval per file. Run it in accept-edits mode
-(Shift+Tab).
+**Expect permission prompts unless you allow `.arena/`.** Every sub-agent writes a file into
+`.arena/`, and in the default permission mode that is one approval per file. Add the allow rule
+`Edit(.arena/**)` with `/permissions`: it approves writes inside `.arena/` and nothing else, so a
+sub-agent that tries to write anywhere else still has to ask. Accept-edits mode also stops the
+prompts, but it lets every sub-agent write anywhere in your project without asking.
 
 **Sub-agents cannot see your chat.** The skill writes a standalone task file, and that file is all
 100 agents ever know. If a requirement never made it into the file, all 100 miss it. It is at
@@ -206,7 +214,9 @@ skills/arena/SKILL.md          the orchestration steps
 skills/arena/templates/        the exact brief every sub-agent gets, one file per role
 skills/arena/bracket.py        the tournament state machine, standard library only
 skills/arena/strategies.json   15 reasoning modes, 12 workflows, 12 strategies. Edit freely
-skills/arena/rubric.md         the five criteria every judge scores on
+skills/arena/rubric.md         the five criteria every judge scores on, weights included
+skills/arena/rubric-creative.md  the rubric for taste tasks, picked with --rubric creative
+agents/arena-worker.md         the sub-agent every job runs on: it can write files, not edit them
 tests/test_bracket.py          the tests
 ```
 

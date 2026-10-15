@@ -6,6 +6,7 @@ does the arithmetic, and the higher weighted total goes through. The loser is ou
 ## The five criteria
 
 Each criterion is scored 0 to 10. The weight is how much of the 100-point total it is worth.
+`bracket.py` reads the names and weights from this table, so change them here.
 
 | criterion | weight | the question |
 | --- | --- | --- |

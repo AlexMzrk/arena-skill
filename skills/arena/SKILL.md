@@ -10,7 +10,7 @@ description: >-
   to make answers compete or to run a tournament over them, or has rejected
   answers to the same request more than once and wants more than another
   retry. Not for a single "try again".
-argument-hint: "[--agents N | --full] [--seed S] <task>"
+argument-hint: "[--agents N | --full] [--rubric creative] [--seed S] <task>"
 ---
 
 # arena
@@ -47,6 +47,7 @@ Read the flags out of the request. Everything that is not a flag is the task.
 | `--agents N` | N competitors. Default 16. |
 | `--full` | 100 competitors. For the answer that matters. |
 | `--quick` | 16 competitors, the same as the default. |
+| `--rubric creative` | Score with `rubric-creative.md`. See step 2 for when to pick it yourself. |
 | `--seed S` | Fixes the cards and the pairings. Default: random, and recorded. |
 | `--wave W` | Sub-agents per wave. Default 10. Only raise it if the user raised Claude Code's limit. |
 
@@ -56,16 +57,19 @@ last answer to it is the baseline to beat.
 Run `ARENA plan --agents N` (or `--full`). It prints the rounds, the sub-agent calls and the waves.
 
 - **The user asked for the arena** (typed `/arena`, said "arena", or asked to make them compete):
-  tell them in one line how big it is, for example "16 agents, 4 rounds, 91 sub-agent calls", and
+  tell them in one line how big it is, for example "16 agents, 4 rounds, 97 sub-agent calls", and
   start.
 - **This skill fired because the user is unhappy** ("that's wrong", "try again", "bad answer") and
   never mentioned the arena: ask once before spending anything. Offer three options: the default
-  arena (16 agents, 91 sub-agent calls), `--full` (100 agents, 595 calls), or an ordinary retry. Wait
+  arena (16 agents, 97 sub-agent calls), `--full` (100 agents, 601 calls), or an ordinary retry. Wait
   for the answer.
 
 Sub-agents write their work into `.arena/` in the current directory. In the default permission mode
-that is one approval per file, which is hundreds on a big run. Before the spawn phase, suggest
-accept-edits mode (Shift+Tab) for the run. Do not change the user's settings yourself.
+that is one approval per file, which is hundreds on a big run. Before the spawn phase, suggest that
+the user add the allow rule `Edit(.arena/**)` with `/permissions`. It covers writing new files too,
+and it approves writes inside `.arena/` only, so a sub-agent that tries to write anywhere else still
+has to ask. Do not suggest accept-edits mode: it lets every sub-agent write anywhere in the project
+without asking. Do not change the user's settings yourself.
 
 ## Step 2: write the task file
 
@@ -87,13 +91,20 @@ that pushes 100 agents the same way, which is the opposite of the point.
 If there is an earlier answer the user was not satisfied with, write it word for word to
 `.arena/baseline.md`.
 
+Pick the rubric. The default `rubric.md` rewards answers that are correct, complete and hold up
+under attack: code, plans, analysis, anything with a right answer. When taste decides instead
+(headlines, copy, names, taglines, stories), pass `--rubric creative`: under the default rubric the
+safest, blandest answer survives, because it gives attackers the least to hit. The user's own
+`--rubric` flag always wins.
+
 ## Step 3: init
 
 ```bash
-ARENA init --agents N --seed S --task-file .arena/task.md --baseline-file .arena/baseline.md
+ARENA init --agents N --seed S --task-file .arena/task.md --baseline-file .arena/baseline.md --rubric creative
 ```
 
-Leave out `--baseline-file` when there is nothing to beat, and `--seed` to get a random one. `init`
+Leave out `--baseline-file` when there is nothing to beat, `--rubric` for the default rubric, and
+`--seed` to get a random one. `init`
 copies the task into the run folder, deals every competitor a different strategy card with no
 repeats, pairs round 1, and writes `arena.json`.
 
@@ -107,7 +118,9 @@ Every phase that runs sub-agents works the same way:
 1. `ARENA prompts <phase>` writes one brief per job and lists the jobs still to run, in waves.
 2. Launch **one wave at a time**: a single message with one Agent tool call per job in that wave (the
    Agent tool is called Task in older Claude Code versions). Each call is:
-   - `subagent_type`: `general-purpose`
+   - `subagent_type`: `arena-skill:arena-worker` when that is in your list of agent types (the
+     skill is installed as a plugin), else `arena-worker` (its file was copied into an agents
+     folder), else `general-purpose`. The worker cannot edit files, only write new ones.
    - `description`: `arena <job id>`
    - `prompt`: `Read <prompt path> and follow it exactly. It is your whole brief.`
    - `run_in_background`: false, where the tool has that option, so the wave comes back together.
@@ -124,7 +137,8 @@ The order `next` takes you through:
 
 - **spawn**, once: every competitor writes its own solution to the task.
 - then every round: **attack** (two per match) → **defend** (two per match) → **judge** (one per
-  match) → `ARENA collect` → `ARENA advance`.
+  match, and in the last two rounds three, whose majority decides) → `ARENA collect` →
+  `ARENA advance`.
 - **final**, once, only when there is a baseline: a judge compares the champion with the answer the
   user rejected, blind to which is which. Then `ARENA collect`.
 - `next` prints DONE: go to step 5.

@@ -11,6 +11,7 @@ Strategy: {{strategy_name}}. {{strategy_how}}
 
 Read your opponent's solution: {{target_solution}}
 You may read your own for comparison: {{own_solution}}. Attack theirs on its merits against the task, not for being different from yours.
+The judge scores with the rubric at {{rubric}}. An attack counts when it costs the solution points there.
 
 Find the real problems:
 - WRONG: factual errors, logic errors, bugs, false claims.

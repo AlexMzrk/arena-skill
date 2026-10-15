@@ -50,16 +50,9 @@ LATEST = "LATEST"
 STATE_FILE = "arena.json"
 PHASES = ("spawn", "attack", "defend", "judge", "final")
 TEMPLATES = ("competitor", "attacker", "defender", "judge", "final")
-CALLS_PER_MATCH = 5        # 2 attacks, 2 defenses, 1 judge
-
-# Mirrors the table in rubric.md. tests/test_bracket.py checks they agree.
-WEIGHTS = (
-    ("correctness", 30),
-    ("completeness", 25),
-    ("specificity", 15),
-    ("robustness", 20),
-    ("clarity", 10),
-)
+CALLS_BEFORE_JUDGING = 4   # 2 attacks, 2 defenses per match
+PANEL_ROUNDS = 2           # the last rounds, where one wrong verdict costs the most
+PANEL_JUDGES = 3
 
 
 class ArenaError(Exception):
@@ -250,8 +243,8 @@ def revised_out(d, rnd, mid, aid):
     return os.path.join(d, "r%d" % rnd, "%s.%s.solution.md" % (mid, aid))
 
 
-def verdict_out(d, rnd, mid):
-    return os.path.join(d, "r%d" % rnd, "%s.verdict.json" % mid)
+def verdict_out(d, rnd, mid, k):
+    return os.path.join(d, "r%d" % rnd, "%s.verdict%d.json" % (mid, k))
 
 
 def final_out(d):
@@ -442,12 +435,46 @@ def alive_ids(state):
 
 # ---------------------------------------------------------------- verdicts
 
-def weighted_total(scores):
-    """0 to 100 from five 0 to 10 scores, weighted as in rubric.md. None if any is missing."""
+_WEIGHT_RE = re.compile(r"^\| (\w+) \| (\d+) \|", re.M)
+
+
+def rubric_path(name):
+    """rubric.md when name is None, otherwise rubric-<name>.md next to this file."""
+    if name is None:
+        return RUBRIC_PATH
+    path = os.path.join(HERE, "rubric-%s.md" % name)
+    if not os.path.isfile(path):
+        have = sorted(f[len("rubric-"):-len(".md")] for f in os.listdir(HERE)
+                      if f.startswith("rubric-") and f.endswith(".md"))
+        raise ArenaError("no rubric called '%s' (there is: %s)" % (name, ", ".join(have) or "nothing"))
+    return path
+
+
+def load_weights(path):
+    """The criteria and their weights, read from the rubric's table in table order."""
+    with open(path, encoding="utf-8") as fh:
+        weights = [(k.lower(), int(w)) for k, w in _WEIGHT_RE.findall(fh.read())]
+    keys = [k for k, _ in weights]
+    if not weights or len(set(keys)) != len(keys) or "fatal" in keys:
+        raise ArenaError("%s needs a criteria table with distinct names, none called fatal" % path)
+    total = sum(w for _, w in weights)
+    if total != 100:
+        raise ArenaError("the weights in %s add up to %d, not 100" % (path, total))
+    return weights
+
+
+def judges_in(agents_n, rnd):
+    """One judge per match, and a panel in the last PANEL_ROUNDS rounds."""
+    rounds = len(bracket_sizes(agents_n)) - 1
+    return PANEL_JUDGES if rnd > rounds - PANEL_ROUNDS else 1
+
+
+def weighted_total(scores, weights):
+    """0 to 100 from 0 to 10 scores, weighted as in the rubric. None if any is missing."""
     if not isinstance(scores, dict):
         return None
     total = 0.0
-    for key, weight in WEIGHTS:
+    for key, weight in weights:
         v = scores.get(key)
         if isinstance(v, bool):
             return None
@@ -480,13 +507,13 @@ def extract_json(text):
     return None
 
 
-def decide(verdict, a, b):
+def decide(verdict, a, b, weights):
     """Apply the rubric's arithmetic to a judge's verdict.
 
     The winner is the higher weighted total. A fatal solution cannot beat a
-    non-fatal one. On an exact tie: fewer standing attacks, then higher
-    correctness, then the judge's own pick. If the judge's pick disagrees with its
-    own scores, the scores win and the note says so.
+    non-fatal one. On an exact tie: fewer standing attacks, then the higher score
+    on the heaviest criterion, then the judge's own pick. If the judge's pick
+    disagrees with its own scores, the scores win and the note says so.
     Returns (winner, {a: total, b: total}, note).
     """
     if not isinstance(verdict, dict):
@@ -498,7 +525,7 @@ def decide(verdict, a, b):
     in_a = re.search(r"\b%s\b" % re.escape(a), pick_raw) is not None
     in_b = re.search(r"\b%s\b" % re.escape(b), pick_raw) is not None
     pick = a if (in_a and not in_b) else b if (in_b and not in_a) else None
-    ta, tb = weighted_total(sa), weighted_total(sb)
+    ta, tb = weighted_total(sa, weights), weighted_total(sb, weights)
     totals = {a: ta, b: tb}
     if ta is None or tb is None:
         if pick:
@@ -514,7 +541,8 @@ def decide(verdict, a, b):
         standing = {str(k).strip().lower(): v for k, v in standing.items()}
         na = len(standing.get(a) or []) if isinstance(standing.get(a), list) else None
         nb = len(standing.get(b) or []) if isinstance(standing.get(b), list) else None
-        ca, cb = float(sa.get("correctness", 0)), float(sb.get("correctness", 0))
+        heaviest = max(weights, key=lambda kw: kw[1])[0]
+        ca, cb = float(sa.get(heaviest, 0)), float(sb.get(heaviest, 0))
         if na is not None and nb is not None and na != nb:
             winner = a if na < nb else b
         elif ca != cb:
@@ -547,7 +575,7 @@ def collect(state):
         try:
             if isinstance(v, dict) and isinstance(v.get("scores"), dict):
                 v = dict(v, scores={str(k).strip().lower(): s for k, s in v["scores"].items()})
-            w, totals, note = decide(v, "x", "y")
+            w, totals, note = decide(v, "x", "y", state["weights"])
         except ArenaError as e:
             os.replace(path, path + ".unreadable")
             return [("final", "unreadable", str(e))]
@@ -563,28 +591,45 @@ def collect(state):
     rd = current_round(state)
     if rd is None:
         return results
+    judges = judges_in(state["agents_n"], rd["n"])
     for m in rd["matches"]:
         if m["winner"]:
             continue
-        path = verdict_out(d, rd["n"], m["id"])
-        if not _has_output(path):
-            results.append((m["id"], "missing", ""))
+        verdicts, complete = [], True
+        for k in range(1, judges + 1):
+            path = verdict_out(d, rd["n"], m["id"], k)
+            label = "%s.judge%d" % (m["id"], k)
+            if not _has_output(path):
+                results.append((label, "missing", ""))
+                complete = False
+                continue
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                v = extract_json(fh.read())
+            try:
+                verdicts.append((v,) + decide(v, m["a"], m["b"], state["weights"]))
+            except ArenaError as e:
+                os.replace(path, path + ".unreadable")
+                results.append((label, "unreadable", str(e)))
+                complete = False
+        if not complete:
             continue
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            v = extract_json(fh.read())
-        try:
-            winner, totals, note = decide(v, m["a"], m["b"])
-        except ArenaError as e:
-            os.replace(path, path + ".unreadable")
-            results.append((m["id"], "unreadable", str(e)))
-            continue
+        votes = [w for _, w, _, _ in verdicts]
+        winner = m["a"] if votes.count(m["a"]) > votes.count(m["b"]) else m["b"]
+        v, _, _, note = next(x for x in verdicts if x[1] == winner)
+        totals = {}
+        for aid in (m["a"], m["b"]):
+            given = [t[aid] for _, _, t, _ in verdicts if t[aid] is not None]
+            totals[aid] = round(sum(given) / len(given), 2) if given else None
+        source = "judge" if judges == 1 else "panel %d-%d" % (votes.count(winner), judges - votes.count(winner))
         survived = v.get("survived") if isinstance(v.get("survived"), list) else []
         record(state, m["id"], winner,
                reason=str(v.get("reason") or "")[:400],
                survived=[str(x) for x in survived][:10],
-               scores=totals, source="judge")
+               scores=totals, source=source)
         loser = m["loser"]
         line = "%s beat %s, %s to %s" % (winner, loser, _fmt(totals[winner]), _fmt(totals[loser]))
+        if judges > 1:
+            line += " (%s)" % source
         results.append((m["id"], "recorded", line + (". " + note if note else "")))
     return results
 
@@ -630,9 +675,12 @@ def phase_jobs(state, phase):
                                  "agent": me, "opponent": opp, "match": m["id"],
                                  "outputs": [defense_out(d, n, m["id"], me), revised_out(d, n, m["id"], me)]})
             else:
-                jobs.append({"id": "%s.judge" % m["id"], "kind": "judge", "round": n,
-                             "match": m["id"], "a": a, "b": b,
-                             "outputs": [verdict_out(d, n, m["id"])]})
+                # A panel's judges alternate which solution they read first.
+                for k in range(1, judges_in(state["agents_n"], n) + 1):
+                    first, second = (a, b) if k % 2 else (b, a)
+                    jobs.append({"id": "%s.judge%d" % (m["id"], k), "kind": "judge", "round": n,
+                                 "match": m["id"], "a": first, "b": second,
+                                 "outputs": [verdict_out(d, n, m["id"], k)]})
     for j in jobs:
         j["prompt"] = prompt_path(d, j["round"], j["id"])
     return jobs
@@ -740,9 +788,11 @@ def render_job(state, job, templates, task):
                  own_solution=agents[me]["solution"],
                  attacks=attack_out(d, job["round"], job["match"], opp),
                  defense_out=job["outputs"][0], solution_out=job["outputs"][1])
-    elif kind == "judge":
+    if kind in ("judge", "final"):
+        v["scores_blank"] = "{%s, \"fatal\": false}" % ", ".join("\"%s\": 0" % k for k, _ in state["weights"])
+    if kind == "judge":
         n, mid, a, b = job["round"], job["match"], job["a"], job["b"]
-        v.update(match=mid, round=n, first=a, second=b,
+        v.update(match=mid, round=n, first=a, second=b, job=job["id"],
                  first_solution=revised_out(d, n, mid, a), second_solution=revised_out(d, n, mid, b),
                  first_attacks=attack_out(d, n, mid, b), second_attacks=attack_out(d, n, mid, a),
                  first_defense=defense_out(d, n, mid, a), second_defense=defense_out(d, n, mid, b),
@@ -814,9 +864,10 @@ def plan_rows(n, wave=DEFAULT_WAVE):
     rows = []
     for rnd, alive in enumerate(bracket_sizes(n)[:-1], start=1):
         m = alive // 2
-        waves = 2 * math.ceil(2 * m / wave) + math.ceil(m / wave)
+        judges = judges_in(n, rnd) * m
+        waves = 2 * math.ceil(2 * m / wave) + math.ceil(judges / wave)
         rows.append({"round": rnd, "alive": alive, "matches": m, "bye": alive % 2,
-                     "calls": CALLS_PER_MATCH * m, "waves": waves})
+                     "calls": CALLS_BEFORE_JUDGING * m + judges, "waves": waves})
     return rows
 
 
@@ -895,6 +946,7 @@ def cmd_plan(args):
     print("  total                     %15d  %5d" % (t["calls"], t["waves"]))
     print("")
     print("  alive per round: %s" % " -> ".join(str(s) for s in bracket_sizes(n)))
+    print("  the last %d rounds have %d judges per match, and the majority decides" % (PANEL_ROUNDS, PANEL_JUDGES))
     print("  plus 1 call for the final check when there is a rejected answer to beat")
     return 0
 
@@ -920,6 +972,8 @@ def cmd_init(args):
             baseline = fh.read().strip()
         if not baseline:
             raise ArenaError("the baseline file is empty")
+    rubric = rubric_path(args.rubric)
+    weights = load_weights(rubric)
     seed = args.seed if args.seed is not None else random.SystemRandom().randrange(1, 1000000)
     default_dir = not args.dir
     d = os.path.abspath(args.dir or os.path.join(ROOT, "run-%s-s%s" % (time.strftime("%Y%m%d-%H%M%S"), seed)))
@@ -938,10 +992,12 @@ def cmd_init(args):
             fh.write(baseline + "\n")
     # The run gets its own copy of the rubric: frozen for this run, and inside the
     # working directory, so judges can read it without a permission prompt each.
-    with open(RUBRIC_PATH, encoding="utf-8") as src, \
+    with open(rubric, encoding="utf-8") as src, \
             open(os.path.join(d, "rubric.md"), "w", encoding="utf-8") as dst:
         dst.write(src.read())
     state = new_state(n, seed, data, d, wave=args.wave, has_baseline=bool(baseline))
+    state["rubric"] = args.rubric or "default"
+    state["weights"] = weights
     save_state(state)
     if default_dir:
         os.makedirs(ROOT, exist_ok=True)
@@ -1232,6 +1288,7 @@ def build_parser():
     s.add_argument("--task-file", help="the task, word for word, as every competitor will get it")
     s.add_argument("--task", help="the task as a string, instead of --task-file")
     s.add_argument("--baseline-file", help="the answer the user was not satisfied with")
+    s.add_argument("--rubric", help="score with rubric-<name>.md instead of rubric.md, e.g. creative")
     s.add_argument("--wave", type=int, default=DEFAULT_WAVE, help="parallel sub-agents per wave (default 10)")
     s.set_defaults(func=cmd_init)
 
