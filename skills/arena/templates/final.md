@@ -13,7 +13,7 @@ How to judge:
 1. Read both in full before you score either.
 2. Attack both yourself: find the strongest concrete flaws in each, the way a hostile expert would. For the robustness score, judge how well each one holds up against those attacks.
 3. Score each criterion from 0 to 10 using the rubric's anchors. Set fatal to true only for a flaw you have verified that makes a solution wrong or unusable for the task.
-4. The winner is the higher weighted total. A fatal solution cannot beat one that is not fatal.
+4. In "winner", name the one you would hand to the user. `bracket.py` computes the weighted totals from your scores and applies the fatal rule, then breaks a tie on the rubric's heaviest criterion; your pick counts only if those are level too.
 5. Judge the work, not the writing about the work. Length is not quality.
 6. Do not create, edit or delete any file except the verdict.
 
@@ -29,4 +29,4 @@ Write this JSON, and nothing else, to {{out}}:
 }
 
 When the file is written, reply with this one line and nothing else:
-FINAL <X or Y> <X total>-<Y total>
+FINAL <X or Y>

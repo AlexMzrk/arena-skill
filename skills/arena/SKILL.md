@@ -121,13 +121,14 @@ tends to average out exactly the distinctiveness that rubric rewards.
 ## Step 3: init
 
 ```bash
-ARENA init --agents N --seed S --task-file .arena/task.md --baseline-file .arena/baseline.md --rubric creative --model M --judge-model M
+ARENA init --agents N --seed S --task-file .arena/task.md --baseline-file .arena/baseline.md --rubric creative --model M --judge-model M --screen --synth --wave W
 ```
 
 Leave out `--baseline-file` when there is nothing to beat, `--rubric` for the default rubric,
-`--model` and `--judge-model` unless the user gave them, and `--seed` to get a random one. `init`
-copies the task into the run folder, deals every competitor a different strategy card with no
-repeats, pairs round 1, and writes `arena.json`.
+`--model` and `--judge-model` unless the user gave them, `--screen` and `--synth` unless they are
+on, `--wave` unless the user set it, and `--seed` to get a random one. `init` copies the task into
+the run folder, deals every competitor a different strategy card with no repeats, pairs round 1,
+and writes `arena.json`.
 
 ## Step 4: the loop
 
@@ -236,7 +237,7 @@ If the solution changes files in the user's project, do not apply it. Ask: apply
 
 ## The briefs
 
-`bracket.py` builds every sub-agent's brief from the templates in this skill's `templates/` folder
-(`competitor.md`, `attacker.md`, `defender.md`, `judge.md`, `final.md`), filling in the
-`{{placeholders}}`. What is in those files is exactly what every sub-agent is told. You do not need
-to read them to run the arena. Never edit a written brief for a single agent.
+`bracket.py` builds every sub-agent's brief from the templates in this skill's `templates/` folder,
+one file per role, filling in the `{{placeholders}}`. What is in those files is exactly what every
+sub-agent is told. You do not need to read them to run the arena. Never edit a written brief for a
+single agent.

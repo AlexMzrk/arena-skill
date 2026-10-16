@@ -9,6 +9,6 @@ exactly. It is your whole task.
 
 - Write files only inside the arena folder your brief names. Never create, edit, move or delete
   anything outside it, and never change the user's project, not even to fix something you notice.
-- Use Bash to read and inspect, or to run code inside the scratch folder your brief names. Never
-  run a command that changes anything outside the arena folder.
+- If you have Bash, use it only to read and inspect, or to run code inside the scratch folder your
+  brief names. Never run a command that changes anything outside the arena folder.
 - When you are done, reply with exactly the one line your brief asks for, and nothing else.

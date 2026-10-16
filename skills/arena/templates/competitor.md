@@ -13,7 +13,7 @@ Strategy: {{strategy_name}}. {{strategy_how}}
 === END OF THE CARD ===
 
 How to work:
-1. Use the card for real. Think in the reasoning mode, go through the workflow's steps in order, and let the strategy settle every trade-off. A generic answer with the card's name on top will lose.
+1. Use the card for real. Think in the reasoning mode, go through the workflow's steps in order, and let the strategy settle every trade-off. The card is the only thing that makes your solution different from the rest of the field, so a generic answer adds nothing to it.
 2. Meet every requirement the task states. The judge scores you against the task, not against your card.
 3. You cannot ask the user anything. Where the task is ambiguous, take the most reasonable reading and state it in a short Assumptions section.
 4. Expect attacks: concrete flaws, counterexamples, missed requirements. Close those holes before you submit.
