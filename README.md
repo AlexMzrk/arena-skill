@@ -21,7 +21,7 @@ back to you, and using it is your call.
 Paste this into Claude:
 
 ```
-https://github.com/Jakeschincariol/arena-skill
+https://github.com/AlexMzrk/arena-skill
 
 Install this skill, then confirm /arena works.
 ```
@@ -29,7 +29,7 @@ Install this skill, then confirm /arena works.
 Or copy the folder yourself, in Claude Code:
 
 ```bash
-git clone https://github.com/Jakeschincariol/arena-skill.git
+git clone https://github.com/AlexMzrk/arena-skill.git
 cp -r arena-skill/skills/arena ~/.claude/skills/
 mkdir -p ~/.claude/agents && cp arena-skill/agents/arena-worker.md ~/.claude/agents/
 ```
@@ -37,7 +37,7 @@ mkdir -p ~/.claude/agents && cp arena-skill/agents/arena-worker.md ~/.claude/age
 Or as a plugin:
 
 ```
-/plugin marketplace add Jakeschincariol/arena-skill
+/plugin marketplace add AlexMzrk/arena-skill
 /plugin install arena-skill@arena-skill
 ```
 
@@ -256,6 +256,7 @@ tests/test_bracket.py          the tests
 ## Credit
 
 Made by Jake Schincariol, [opusjake.ai](https://opusjake.ai).
+This fork, with the 1.1.0 changes, is kept by [AlexMzrk](https://github.com/AlexMzrk).
 
 ## License
 

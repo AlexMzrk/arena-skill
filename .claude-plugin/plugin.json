@@ -3,11 +3,11 @@
   "description": "When Claude keeps giving you bad answers, make 16 versions of it fight to the death, or 100 with --full. Same task, a different strategy for each, a bracket, one answer left. Free Claude Code skill.",
   "version": "1.1.0",
   "author": {
-    "name": "Jake Schincariol",
-    "url": "https://opusjake.ai"
+    "name": "AlexMzrk",
+    "url": "https://github.com/AlexMzrk"
   },
-  "homepage": "https://github.com/Jakeschincariol/arena-skill",
-  "repository": "https://github.com/Jakeschincariol/arena-skill",
+  "homepage": "https://github.com/AlexMzrk/arena-skill",
+  "repository": "https://github.com/AlexMzrk/arena-skill",
   "license": "MIT",
   "keywords": [
     "claude-code",
