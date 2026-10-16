@@ -73,6 +73,7 @@ answer, make them compete". When it starts itself like that, it asks before it s
 | `--seed S` | Same seed, same cards and same bracket. Default random, and recorded. |
 | `--wave W` | Sub-agents per wave. Default 10. Only raise it if you raised Claude Code's limit. |
 | `--headless` | Run the tournament outside the chat, one `claude -p` process per job. See below. |
+| `--screen` | After the spawn, one judge per group of 10 keeps the best 2. 100 agents for a third of the calls. |
 | `--synth` | After the bracket, borrow what the runners-up did better. Kept only if blind judges prefer it. |
 
 ## How it works
@@ -85,7 +86,8 @@ answer, make them compete". When it starts itself like that, it asks before it s
    rigour, user empathy first, edge cases first, speed...). That is 2,160 different cards. The
    dealer gives each agent its own, with no repeats. When there is an answer you rejected, half of
    them read it and half get only what you disliked about it, so it cannot pull the whole field
-   toward it.
+   toward it. With `--screen`, a judge per group of up to 10 then ranks the solutions, and only the
+   best 2 of each group enter the bracket.
 2. **Attack.** Solutions are paired, and the pairing avoids putting two agents with the same
    reasoning mode against each other. Each side attacks the other's solution through its own card:
    what is wrong, what requirement it missed, the exact input that breaks it. Up to 7 attacks,
@@ -148,6 +150,12 @@ The skill is free. The tokens are yours, and 100 agents is a lot of them.
 | 32 | 5 | 193 | 28 |
 | 16, the default | 4 | 97 | 16 |
 | 8 | 3 | 49 | 10 |
+
+`--screen` cuts the field before the bracket: one judge per group of up to 10 ranks it and the best
+2 go on, so 100 agents become 20 and the run costs 209 calls in 28 waves (64: 142, 32: 77, 16: 39).
+Most of the bill was round 1, full matches between weak solutions; the screen keeps the variety of
+100 different cards for a third of the price. The trade: 80 solutions leave on one judge's ranking
+instead of a match, which is why each group keeps two, not one.
 
 Add one call when there is a rejected answer to beat. Every call reads the task and one or two
 solutions, so the bill grows with the size of the task. The default 16 covers everyday things.

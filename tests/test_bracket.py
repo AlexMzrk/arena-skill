@@ -580,6 +580,8 @@ elif job["kind"] == "defender":
     put(job["outputs"][1], "revised by %%s" %% job["agent"])
 elif job["kind"] == "judge":
     put(job["outputs"][0], json.dumps({"scores": {job["a"]: dict(s, correctness=9), job["b"]: s}, "winner": job["a"]}))
+elif job["kind"] == "screen":
+    put(job["outputs"][0], json.dumps({"ranking": sorted(job["group"], reverse=True), "reason": "fake"}))
 elif job["kind"] == "synth":
     champ = state["agents"][state["champion"]]["solution"]
     put(job["outputs"][0], open(champ).read() if os.environ.get("FAKE_SYNTH_SAME") else "merged by the editor")
@@ -699,11 +701,68 @@ class HeadlessRun(TempDir):
         self.assertEqual([c["job"] for c in self.calls()], ["a001.spawn"])
         self.assertEqual(load(self.d)["synth"]["result"]["reason"], "no runners-up to borrow from")
 
+    def test_screening_keeps_the_top_two_of_each_group(self):
+        r = self.run_arena("--agents", 24, "--screen", "--judge-model", "opus")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("screen: 6 of 24 go on to the bracket", r.stdout)
+        state = load(self.d)
+        kept = sorted(aid for g in state["screen"]["groups"] for aid in sorted(g, reverse=True)[:2])
+        self.assertEqual(state["rounds"][0]["alive"], kept)
+        out = [a for a, v in state["agents"].items() if v["eliminated_by"] == "screen"]
+        self.assertEqual(len(out), 18)
+        self.assertTrue(all(state["agents"][a]["eliminated_in"] == 0 for a in out))
+        calls = self.calls()
+        self.assertEqual(len(calls), B.plan_totals(24, screen=True)["calls"])
+        screen = next(c["argv"] for c in calls if c["job"] == "screen.g01")
+        self.assertEqual(screen[screen.index("--model") + 1], "opus")
+        rep = json.loads(self.ok("winner", "--json", "--dir", self.d))
+        self.assertIn(rep["screen"]["rank"], (1, 2))
+        self.assertEqual(rep["screen"]["of"], 8)
+
     def test_an_old_cli_is_refused_before_anything_runs(self):
         r = self.run_arena("--agents", 2, lack="--safe-mode")
         self.assertEqual(r.returncode, 2)
         self.assertIn("lacks --safe-mode", r.stderr)
         self.assertFalse(os.path.exists(self.log))
+
+
+class Screening(TempDir):
+    def test_groups_cover_everyone_once_and_are_balanced(self):
+        ids = B.agent_ids(25)
+        groups = B.screen_groups(ids, 3)
+        self.assertEqual(sorted(len(g) for g in groups), [8, 8, 9])
+        self.assertEqual(sorted(a for g in groups for a in g), ids)
+        self.assertEqual(groups, B.screen_groups(ids, 3))
+        self.assertEqual(len(B.screen_groups(B.agent_ids(100), 1)), 10)
+
+    def test_plan_and_panels_count_from_the_bracket(self):
+        t = B.plan_totals(100, screen=True)
+        self.assertEqual((t["screen_groups"], t["entrants"], t["rounds"], t["calls"]), (10, 20, 5, 209))
+        self.assertEqual(B.plan_totals(16, screen=True)["calls"], 39)
+        self.assertEqual([B.judges_in(20, r) for r in range(1, 6)], [1, 1, 1, 3, 3])
+        r = cli("plan", "--agents", 10, "--screen")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("more than 10 agents", r.stderr)
+
+    def test_a_bad_ranking_is_set_aside_and_nothing_opens(self):
+        d = os.path.join(self.tmp, "run")
+        self.ok("init", "--agents", 12, "--seed", 2, "--task", "t", "--screen", "--dir", d)
+        state = load(d)
+        self.assertEqual(state["rounds"], [], "round 1 waits for the screening")
+        g1, g2 = state["screen"]["groups"]
+        os.makedirs(os.path.join(d, "r0"))
+        write(B.screen_out(d, "g01"), json.dumps({"ranking": ["a999", g1[0]]}))
+        write(B.screen_out(d, "g02"), json.dumps({"ranking": g2}))
+        results = B.collect(state)
+        self.assertEqual([(m, w) for m, w, _ in results], [("screen.g01", "unreadable")])
+        self.assertTrue(os.path.exists(B.screen_out(d, "g01") + ".unreadable"))
+        self.assertEqual(state["rounds"], [])
+        r = cli("fail", "screen.g01", "--dir", d)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("fresh run", r.stderr)
+        write(B.screen_out(d, "g01"), json.dumps({"ranking": [g1[3], g1[1], "nonsense"]}))
+        B.collect(state)
+        self.assertEqual(sorted(state["rounds"][0]["alive"]), sorted([g1[3], g1[1], g2[0], g2[1]]))
 
 
 class Guards(TempDir):

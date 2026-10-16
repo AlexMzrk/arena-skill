@@ -53,20 +53,22 @@ Read the flags out of the request. Everything that is not a flag is the task.
 | `--seed S` | Fixes the cards and the pairings. Default: random, and recorded. |
 | `--wave W` | Sub-agents per wave. Default 10. Only raise it if the user raised Claude Code's limit. |
 | `--headless` | Run the tournament outside the chat with `ARENA run`, one `claude -p` process per job. See step 4. |
+| `--screen` | After the spawn, one judge per group of up to 10 keeps the best 2 for the bracket. 100 agents: 209 calls instead of 601. Needs more than 10 agents. |
 | `--synth` | After the bracket, an editor improves the champion with what the runners-up did better, and 3 blind judges keep the better version. 4 more calls. |
 
 No task text at all means: the task is the user's most recent request in this conversation, and your
 last answer to it is the baseline to beat.
 
-Run `ARENA plan --agents N` (or `--full`). It prints the rounds, the sub-agent calls and the waves.
+Run `ARENA plan --agents N` (or `--full`, plus `--screen` if it is on). It prints the rounds, the
+sub-agent calls and the waves.
 
 - **The user asked for the arena** (typed `/arena`, said "arena", or asked to make them compete):
   tell them in one line how big it is, for example "16 agents, 4 rounds, 97 sub-agent calls", and
   start.
 - **This skill fired because the user is unhappy** ("that's wrong", "try again", "bad answer") and
-  never mentioned the arena: ask once before spending anything. Offer three options: the default
-  arena (16 agents, 97 sub-agent calls), `--full` (100 agents, 601 calls), or an ordinary retry. Wait
-  for the answer.
+  never mentioned the arena: ask once before spending anything. Offer four options: the default
+  arena (16 agents, 97 sub-agent calls), `--full --screen` (100 agents screened down to 20, 209
+  calls), `--full` (100 agents, 601 calls), or an ordinary retry. Wait for the answer.
 
 With `--headless`, skip the rest of this step: `run` sets the permissions of its own processes.
 
@@ -170,6 +172,8 @@ Every phase that runs sub-agents works the same way:
 The order `next` takes you through:
 
 - **spawn**, once: every competitor writes its own solution to the task.
+- **screen**, once, only with `--screen`: one judge per group of up to 10 ranks the group, and the
+  best 2 of each group go on. The rest are out. Then `ARENA collect`, which also opens round 1.
 - then every round: **attack** (two per match) → **defend** (two per match) → **judge** (one per
   match, and in the last two rounds three, whose majority decides) → `ARENA collect` →
   `ARENA advance`.

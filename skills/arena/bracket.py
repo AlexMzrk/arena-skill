@@ -54,12 +54,14 @@ DEFAULT_WAVE = 10          # Claude Code runs at most 10 tool calls at once by d
 ROOT = ".arena"
 LATEST = "LATEST"
 STATE_FILE = "arena.json"
-PHASES = ("spawn", "attack", "defend", "judge", "synth", "synthjudge", "final")
-TEMPLATES = ("competitor", "attacker", "defender", "judge", "synth", "synthjudge", "final")
-JUDGES = ("judge", "synthjudge", "final")   # job kinds, and the phases that run them
+PHASES = ("spawn", "screen", "attack", "defend", "judge", "synth", "synthjudge", "final")
+TEMPLATES = ("competitor", "screen", "attacker", "defender", "judge", "synth", "synthjudge", "final")
+JUDGES = ("screen", "judge", "synthjudge", "final")   # job kinds, and the phases that run them
 CALLS_BEFORE_JUDGING = 4   # 2 attacks, 2 defenses per match
 PANEL_ROUNDS = 2           # the last rounds, where one wrong verdict costs the most
 PANEL_JUDGES = 3
+SCREEN_GROUP = 10          # at most this many solutions per screening judge
+SCREEN_KEEP = 2            # the best of each group that enter the bracket
 DEFAULT_PARALLEL = 10
 DEFAULT_TIMEOUT = 1200     # seconds per sub-agent job in `run`
 JUDGE_TRIES = 3
@@ -245,6 +247,10 @@ def spawn_out(d, aid):
     return os.path.join(d, "r0", aid + ".md")
 
 
+def screen_out(d, gid):
+    return os.path.join(d, "r0", "screen.%s.json" % gid)
+
+
 def attack_out(d, rnd, mid, attacker):
     return os.path.join(d, "r%d" % rnd, "%s.%s.attack.md" % (mid, attacker))
 
@@ -284,7 +290,25 @@ def _has_output(path):
 
 # ---------------------------------------------------------------- the bracket
 
-def new_state(n, seed, data, run_dir, wave=DEFAULT_WAVE, has_baseline=False):
+def screen_groups(ids, seed):
+    """Deal the competitors into balanced screening groups of at most SCREEN_GROUP,
+    each in a shuffled order so the order a judge reads them in means nothing."""
+    ids = list(ids)
+    random.Random("arena-screen:%s" % seed).shuffle(ids)
+    k = math.ceil(len(ids) / SCREEN_GROUP)
+    return [ids[i::k] for i in range(k)]
+
+
+def screen_entrants(n):
+    return SCREEN_KEEP * math.ceil(n / SCREEN_GROUP)
+
+
+def bracket_n(state):
+    """How many competitors entered round 1: all of them, or the ones the screening kept."""
+    return state.get("bracket_n") or state["agents_n"]
+
+
+def new_state(n, seed, data, run_dir, wave=DEFAULT_WAVE, has_baseline=False, screen=False):
     run_dir = os.path.abspath(run_dir)
     ids = agent_ids(n)
     agents = {}
@@ -314,8 +338,11 @@ def new_state(n, seed, data, run_dir, wave=DEFAULT_WAVE, has_baseline=False):
         "rounds": [],
         "champion": None,
         "final": None,
+        "screen": {"groups": screen_groups(ids, seed), "result": None} if screen else None,
+        "bracket_n": screen_entrants(n) if screen else n,
     }
-    open_round(state, ids)
+    if not screen:
+        open_round(state, ids)
     return state
 
 
@@ -453,6 +480,63 @@ def rounds_played(state):
 
 def alive_ids(state):
     return sorted(a for a, v in state["agents"].items() if v["alive"])
+
+
+# ---------------------------------------------------------------- screening
+
+def screen_open(state):
+    scr = state.get("screen")
+    return bool(scr and not scr.get("result"))
+
+
+def _gid(i):
+    return "g%02d" % (i + 1)
+
+
+def _ranking(path, group):
+    """A screening judge's ranking, reduced to the ids of its group, best first."""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        v = extract_json(fh.read())
+    if not isinstance(v, dict) or not isinstance(v.get("ranking"), list):
+        raise ArenaError("verdict has no ranking list")
+    order = []
+    for x in v["ranking"]:
+        aid = str(x).strip().lower()
+        if aid in group and aid not in order:
+            order.append(aid)
+    if len(order) < min(SCREEN_KEEP, len(group)):
+        raise ArenaError("the ranking names fewer than %d solutions of its group" % SCREEN_KEEP)
+    return order, str(v.get("reason") or "")[:400]
+
+
+def collect_screen(state):
+    """Read every group's ranking. Only when all are readable: the top SCREEN_KEEP of each
+    group go on, the rest are out in round 0, and round 1 opens."""
+    scr = state["screen"]
+    results, ranked = [], {}
+    for i, group in enumerate(scr["groups"]):
+        path = screen_out(state["dir"], _gid(i))
+        if not _has_output(path):
+            results.append(("screen." + _gid(i), "missing", ""))
+            continue
+        try:
+            ranked[_gid(i)] = _ranking(path, group)
+        except ArenaError as e:
+            os.replace(path, path + ".unreadable")
+            results.append(("screen." + _gid(i), "unreadable", str(e)))
+    if results:
+        return results
+    kept = []
+    for i, group in enumerate(scr["groups"]):
+        top = ranked[_gid(i)][0][:SCREEN_KEEP]
+        kept.extend(top)
+        for aid in group:
+            if aid not in top:
+                a = state["agents"][aid]
+                a["alive"], a["eliminated_in"], a["eliminated_by"] = False, 0, "screen"
+    scr["result"] = {gid: {"ranking": order, "reason": reason} for gid, (order, reason) in ranked.items()}
+    open_round(state, kept)
+    return [("screen", "recorded", "%d of %d go on to the bracket" % (len(kept), state["agents_n"]))]
 
 
 # ---------------------------------------------------------------- synthesis
@@ -669,6 +753,8 @@ def collect(state):
     judge job shows up as missing again and gets re-run."""
     d = state["dir"]
     results = []
+    if screen_open(state):
+        return collect_screen(state)
     if synth_open(state):
         return collect_synth(state)
     if state["champion"]:
@@ -695,7 +781,7 @@ def collect(state):
     rd = current_round(state)
     if rd is None:
         return results
-    judges = judges_in(state["agents_n"], rd["n"])
+    judges = judges_in(bracket_n(state), rd["n"])
     for m in rd["matches"]:
         if m["winner"]:
             continue
@@ -759,6 +845,11 @@ def phase_jobs(state, phase):
         fin = state.get("final")
         if state["champion"] and fin and not fin.get("result"):
             jobs.append({"id": "final.judge", "kind": "final", "round": None, "outputs": [final_out(d)]})
+    elif phase == "screen":
+        if screen_open(state):
+            for i, group in enumerate(state["screen"]["groups"]):
+                jobs.append({"id": "screen." + _gid(i), "kind": "screen", "round": 0, "group": group,
+                             "outputs": [screen_out(d, _gid(i))]})
     elif phase == "synth":
         if synth_open(state) and runners_up(state):
             jobs.append({"id": "synth.merge", "kind": "synth", "round": None, "outputs": [synth_out(d)]})
@@ -790,7 +881,7 @@ def phase_jobs(state, phase):
                                  "outputs": [defense_out(d, n, m["id"], me), revised_out(d, n, m["id"], me)]})
             else:
                 # A panel's judges alternate which solution they read first.
-                for k in range(1, judges_in(state["agents_n"], n) + 1):
+                for k in range(1, judges_in(bracket_n(state), n) + 1):
                     first, second = (a, b) if k % 2 else (b, a)
                     jobs.append({"id": "%s.judge%d" % (m["id"], k), "kind": "judge", "round": n,
                                  "match": m["id"], "a": first, "b": second,
@@ -931,13 +1022,17 @@ def render_job(state, job, templates, task):
                  first_words_before=_words(agents[a]["solution"]),
                  second_words_before=_words(agents[b]["solution"]),
                  out=job["outputs"][0])
+    elif kind == "screen":
+        group = job["group"]
+        v.update(count=len(group), keep=SCREEN_KEEP, job=job["id"], out=job["outputs"][0],
+                 solutions="\n".join("- %s: %s" % (aid, agents[aid]["solution"]) for aid in group))
     elif kind == "synth":
         champ, last = state["champion"], rounds_played(state)
         m = next(m for m in state["rounds"][last - 1]["matches"] if champ in (m["a"], m["b"]))
         v.update(rounds=last, out=job["outputs"][0], champion_solution=agents[champ]["solution"],
                  runners_up="\n".join("- %s" % agents[aid]["solution"] for aid in runners_up(state)),
                  verdicts="\n".join("- %s" % verdict_out(d, last, m["id"], k)
-                                    for k in range(1, judges_in(state["agents_n"], last) + 1)))
+                                    for k in range(1, judges_in(bracket_n(state), last) + 1)))
     elif kind == "synthjudge":
         a, b = job["a"], job["b"]
         path = lambda label: os.path.join(d, "synth", label + ".md")
@@ -985,12 +1080,16 @@ def write_prompts(state, phase):
 
 
 def next_action(state):
-    """(phase, jobs_left, jobs_total). phase is one of spawn, attack, defend, judge,
-    synth, synthjudge, final, collect, advance, done."""
+    """(phase, jobs_left, jobs_total). phase is one of spawn, screen, attack, defend,
+    judge, synth, synthjudge, final, collect, advance, done."""
     spawn = phase_jobs(state, "spawn")
     left = missing_jobs(spawn)
     if left:
         return "spawn", left, spawn
+    if screen_open(state):
+        jobs = phase_jobs(state, "screen")
+        left = missing_jobs(jobs)
+        return ("screen", left, jobs) if left else ("collect", [], jobs)
     if synth_open(state):
         for phase in ("synth", "synthjudge"):
             jobs = phase_jobs(state, phase)
@@ -1029,11 +1128,19 @@ def plan_rows(n, wave=DEFAULT_WAVE):
     return rows
 
 
-def plan_totals(n, wave=DEFAULT_WAVE):
-    rows = plan_rows(n, wave)
-    calls = n + sum(r["calls"] for r in rows)
-    waves = math.ceil(n / wave) + sum(r["waves"] for r in rows)
-    return {"agents": n, "rounds": len(rows), "calls": calls, "waves": waves, "rows": rows}
+def plan_totals(n, wave=DEFAULT_WAVE, screen=False):
+    groups = math.ceil(n / SCREEN_GROUP) if screen else 0
+    entrants = screen_entrants(n) if screen else n
+    rows = plan_rows(entrants, wave)
+    calls = n + groups + sum(r["calls"] for r in rows)
+    waves = math.ceil(n / wave) + math.ceil(groups / wave) + sum(r["waves"] for r in rows)
+    return {"agents": n, "screen_groups": groups, "entrants": entrants, "rounds": len(rows),
+            "calls": calls, "waves": waves, "rows": rows}
+
+
+def _check_screen(n, screen):
+    if screen and n <= SCREEN_GROUP:
+        raise ArenaError("--screen needs more than %d agents: with fewer there is nothing to screen" % SCREEN_GROUP)
 
 
 # ---------------------------------------------------------------- state io
@@ -1168,6 +1275,8 @@ def run_arena(run_dir, claude, parallel, timeout):
             for mid, what, note in collect(state):
                 if what != "recorded":
                     print("  %s %s, judging it again. %s" % (mid, what, note))
+                elif mid in ("screen", "synth"):
+                    print("%s: %s" % (mid, note), flush=True)
             save_state(state)
             continue
         if phase == "advance":
@@ -1228,11 +1337,17 @@ def _agents_arg(args):
     return DEFAULT_AGENTS if args.agents is None else args.agents
 
 
+def _sizes_line(t):
+    sizes = " -> ".join(str(s) for s in bracket_sizes(t["entrants"]))
+    return "%d, screened to %s" % (t["agents"], sizes) if t["screen_groups"] else sizes
+
+
 def cmd_plan(args):
     n = _agents_arg(args)
     if n < 1:
         raise ArenaError("--agents must be at least 1")
-    t = plan_totals(n, args.wave)
+    _check_screen(n, args.screen)
+    t = plan_totals(n, args.wave, args.screen)
     if args.json:
         print(json.dumps(t, indent=1))
         return 0
@@ -1240,12 +1355,18 @@ def cmd_plan(args):
     print("")
     print("  round  alive  matches  bye  sub-agent calls  waves")
     print("  spawn  %5d  %7s  %3s  %15d  %5d" % (n, "-", "-", n, math.ceil(n / args.wave)))
+    if t["screen_groups"]:
+        print("  screen %5d  %7s  %3s  %15d  %5d" % (n, "-", "-", t["screen_groups"],
+                                                    math.ceil(t["screen_groups"] / args.wave)))
     for r in t["rows"]:
         print("  %5d  %5d  %7d  %3s  %15d  %5d"
               % (r["round"], r["alive"], r["matches"], "yes" if r["bye"] else "-", r["calls"], r["waves"]))
     print("  total                     %15d  %5d" % (t["calls"], t["waves"]))
     print("")
-    print("  alive per round: %s" % " -> ".join(str(s) for s in bracket_sizes(n)))
+    print("  alive per round: %s" % _sizes_line(t))
+    if t["screen_groups"]:
+        print("  screening: %d groups of at most %d, one judge each, the best %d of each go on"
+              % (t["screen_groups"], SCREEN_GROUP, SCREEN_KEEP))
     print("  the last %d rounds have %d judges per match, and the majority decides" % (PANEL_ROUNDS, PANEL_JUDGES))
     print("  plus 1 call for the final check when there is a rejected answer to beat")
     return 0
@@ -1258,6 +1379,7 @@ def cmd_init(args):
     data = load_strategies()
     if n < 1 or n > combo_count(data):
         raise ArenaError("--agents must be between 1 and %d (the number of distinct cards)" % combo_count(data))
+    _check_screen(n, args.screen)
     if args.task_file:
         with open(args.task_file, encoding="utf-8") as fh:
             task = fh.read()
@@ -1295,7 +1417,7 @@ def cmd_init(args):
     with open(rubric, encoding="utf-8") as src, \
             open(os.path.join(d, "rubric.md"), "w", encoding="utf-8") as dst:
         dst.write(src.read())
-    state = new_state(n, seed, data, d, wave=args.wave, has_baseline=bool(baseline))
+    state = new_state(n, seed, data, d, wave=args.wave, has_baseline=bool(baseline), screen=args.screen)
     state["rubric"] = args.rubric or "default"
     state["weights"] = weights
     state["models"] = {"competitor": args.model, "judge": args.judge_model or args.model}
@@ -1306,7 +1428,7 @@ def cmd_init(args):
         os.makedirs(ROOT, exist_ok=True)
         with open(os.path.join(ROOT, LATEST), "w", encoding="utf-8") as fh:
             fh.write(d + "\n")
-    t = plan_totals(n, args.wave)
+    t = plan_totals(n, args.wave, args.screen)
     extras, calls, waves = [], t["calls"], t["waves"]
     if args.synth and n > 1:
         extras.append("the synthesis")
@@ -1318,7 +1440,7 @@ def cmd_init(args):
     print("seed %s. %d agents, %d distinct cards dealt from %d, no repeats."
           % (seed, n, n, combo_count(data)))
     print("%d rounds (%s). %d sub-agent calls in %d waves of %d%s."
-          % (t["rounds"], " -> ".join(str(s) for s in bracket_sizes(n)), calls, waves, args.wave,
+          % (t["rounds"], _sizes_line(t), calls, waves, args.wave,
              ", including " + " and ".join(extras) if extras else ""))
     print("next: %s" % _cmd(state["dir"], "next"))
     return 0
@@ -1328,9 +1450,11 @@ def cmd_next(args):
     state = load_state(args)
     phase, left, jobs = next_action(state)
     rd = current_round(state)
-    total_rounds = len(bracket_sizes(state["agents_n"])) - 1
+    total_rounds = len(bracket_sizes(bracket_n(state))) - 1
     if phase == "spawn":
-        print("spawn: %d competitors, then %d round(s)" % (state["agents_n"], total_rounds))
+        print("spawn: %d competitors, then %s%d round(s)"
+              % (state["agents_n"], "screening to %d, then " % bracket_n(state) if state.get("screen") else "",
+                 total_rounds))
     elif rd:
         print("round %d of %d, %d alive" % (rd["n"], total_rounds, len(rd["alive"])))
     elif state["champion"]:
@@ -1360,7 +1484,7 @@ def cmd_prompts(args):
     left = missing_jobs(jobs)
     w = state["wave"]
     rd = current_round(state)
-    where = "round 0" if args.phase == "spawn" else ("round %d" % rd["n"] if rd else "after the bracket")
+    where = "round 0" if args.phase in ("spawn", "screen") else ("round %d" % rd["n"] if rd else "after the bracket")
     waves = [left[i:i + w] for i in range(0, len(left), w)]
     print("%s, %s: %d job(s), %d still to run, %d wave(s) of up to %d"
           % (where, args.phase, len(jobs), len(left), len(waves), w))
@@ -1498,6 +1622,9 @@ def cmd_status(args):
     print("arena %s" % state["dir"])
     print("seed %s, %d agents, waves of %d, %d distinct cards available"
           % (state["seed"], state["agents_n"], state["wave"], state["cards_available"]))
+    scr = state.get("screen")
+    if scr:
+        print("screen: %d groups, %s" % (len(scr["groups"]), "%d went on" % bracket_n(state) if scr["result"] else "open"))
     print("  round  alive  matches  bye     eliminated  state")
     for r in rows:
         print("  %5d  %5d  %7d  %-6s  %10d  %s"
@@ -1526,7 +1653,13 @@ def winner_report(state):
                              "score": sc.get(champ), "opponent_score": sc.get(opp),
                              "reason": m.get("reason"), "survived": m.get("survived") or []})
                 survived.extend(m.get("survived") or [])
-    return {"champion": champ, "card": agent["card"], "card_line": _card_line(agent["card"]),
+    screen = None
+    scr = (state.get("screen") or {}).get("result")
+    if scr:
+        gid, res = next((g, r) for g, r in scr.items() if champ in r["ranking"])
+        group = state["screen"]["groups"][int(gid[1:]) - 1]
+        screen = {"group": gid, "rank": res["ranking"].index(champ) + 1, "of": len(group), "reason": res["reason"]}
+    return {"champion": champ, "card": agent["card"], "card_line": _card_line(agent["card"]), "screen": screen,
             "solution": champion_solution(state), "rounds": rounds_played(state), "agents": state["agents_n"],
             "matches_won": sum(1 for p in path if not p["bye"]), "path": path, "attacks_survived": survived,
             "synth": (state.get("synth") or {}).get("result"), "final": (state.get("final") or {}).get("result")}
@@ -1548,6 +1681,9 @@ def cmd_winner(args):
     print("solution  %s" % rep["solution"])
     print("rounds    %d played, %d agents in, 1 left, %d match(es) won"
           % (rep["rounds"], rep["agents"], rep["matches_won"]))
+    if rep["screen"]:
+        sc = rep["screen"]
+        print("  screen   ranked %d of %d in its group. %s" % (sc["rank"], sc["of"], sc["reason"]))
     for p in rep["path"]:
         if p["bye"]:
             print("  round %d  bye" % p["round"])
@@ -1620,6 +1756,7 @@ def build_parser():
     s.add_argument("--quick", action="store_true")
     s.add_argument("--full", action="store_true")
     s.add_argument("--wave", type=int, default=DEFAULT_WAVE)
+    s.add_argument("--screen", action="store_true")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_plan)
 
@@ -1634,6 +1771,9 @@ def build_parser():
     s.add_argument("--rubric", help="score with rubric-<name>.md instead of rubric.md, e.g. creative")
     s.add_argument("--model", help="the Agent model for every sub-agent, e.g. sonnet (default: the session's)")
     s.add_argument("--judge-model", help="the Agent model for judges and the final check (default: --model)")
+    s.add_argument("--screen", action="store_true",
+                   help="after the spawn, one judge per group of %d keeps the best %d for the bracket"
+                   % (SCREEN_GROUP, SCREEN_KEEP))
     s.add_argument("--synth", action="store_true",
                    help="after the bracket, let an editor borrow from the runners-up; 3 blind judges keep the better version")
     s.add_argument("--wave", type=int, default=DEFAULT_WAVE, help="parallel sub-agents per wave (default 10)")
