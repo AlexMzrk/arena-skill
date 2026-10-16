@@ -227,6 +227,9 @@ If the solution changes files in the user's project, do not apply it. Ask: apply
   and carry on.
 - The commands `bracket.py` prints end in `--dir <run folder>`: run them as printed. A bare `ARENA`
   command finds the run through `.arena/LATEST`, so run those from the directory you ran `init` in.
+- Run every `ARENA` command as a plain `python3 ...` command. Never put the path in a shell variable,
+  and never chain it with `mkdir`, `cat`, a heredoc or anything else that is not `ARENA`. A plain
+  command is one the user can allow once for the whole run; anything else asks again.
 - Sub-agents only write inside `.arena/`. If one wrote anywhere else, tell the user.
 - If the user says stop, stop. `ARENA status` shows where it got to, and `ARENA next` resumes it
   later.
