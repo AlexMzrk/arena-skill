@@ -1,7 +1,7 @@
 {
   "name": "arena-skill",
   "description": "When Claude keeps giving you bad answers, make 100 versions of it fight to the death. Same task, 100 different strategies, a bracket, one answer left. Free Claude Code skill.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": {
     "name": "Jake Schincariol",
     "url": "https://opusjake.ai"

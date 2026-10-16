@@ -106,6 +106,9 @@ that pushes 100 agents the same way, which is the opposite of the point.
 If there is an earlier answer the user was not satisfied with, write it word for word to
 `.arena/baseline.md`.
 
+Write both files with the Write tool, not with a shell command: the allow rule from step 1 covers
+the Write tool, so neither file needs an approval. Then run `init` as a command of its own.
+
 Pick the rubric. The default `rubric.md` rewards answers that are correct, complete and hold up
 under attack: code, plans, analysis, anything with a right answer. When taste decides instead
 (headlines, copy, names, taglines, stories), pass `--rubric creative`: under the default rubric the
