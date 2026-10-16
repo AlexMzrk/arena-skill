@@ -1,7 +1,7 @@
 # The Arena skill
 
-When Claude keeps giving you bad answers, make 100 versions of it fight to the death. One Claude
-Code skill. Free, MIT, no signup, no API key, nothing to connect.
+When Claude keeps giving you bad answers, make 16 versions of it fight to the death, or 100 with
+`--full`. One Claude Code skill. Free, MIT, no signup, no API key, nothing to connect.
 
 You use it when you are not happy with what Claude gave you. Instead of asking again and again,
 `/arena` spins up 16 sub-agents, or 100 with `--full`, and gives every one of them the exact same
@@ -191,14 +191,14 @@ python3 -m unittest discover -s tests -v
 
 ## The fine print
 
-**"100 versions of Claude" means 100 sub-agents of the model you are running.** Not 100 different
+**"16 versions of Claude" means 16 sub-agents of the model you are running.** Not 16 different
 models. What makes them different is the card. The dealer guarantees that no two agents get the
 same card, that every reasoning mode, workflow and strategy is dealt as evenly as possible, and that
 up to 144 agents, no two agents even share two of their three parts.
 
 **A competitor is its card plus its solution file.** Sub-agents do not remember anything between
 calls, so when competitor a017 attacks in round 3, that is a fresh sub-agent handed a017's card and
-a017's latest solution. 100 competitors, 601 calls.
+a017's latest solution. 16 competitors make 97 calls, 100 make 601.
 
 **"The best answer" means the one that survived every match.** The judges are Claude too, scoring
 against a written rubric that is in this repo for you to read and change. What you get is the
@@ -228,8 +228,8 @@ sub-agent that tries to write anywhere else still has to ask. Accept-edits mode 
 prompts, but it lets every sub-agent write anywhere in your project without asking.
 
 **Sub-agents cannot see your chat.** The skill writes a standalone task file, and that file is all
-100 agents ever know. If a requirement never made it into the file, all 100 miss it. It is at
-`.arena/<run>/task.md` if you want to check.
+the agents ever know. If a requirement never made it into the file, every one of them misses it.
+It is at `.arena/<run>/task.md` if you want to check.
 
 **It never edits your project.** Code changes come back as a diff or as full files inside the
 winning answer. Applying them is your call, and the skill asks. `.arena/` gets its own
@@ -238,7 +238,7 @@ winning answer. Applying them is your call, and the skill asks. `.arena/` gets i
 **The same seed gives the same cards and the same bracket.** Not the same answers. The model is not
 deterministic.
 
-**It does not fix a bad task.** Vague task in, 100 flavours of vague out.
+**It does not fix a bad task.** Vague task in, 16 flavours of vague out.
 
 ## Files
 
