@@ -54,8 +54,9 @@ DEFAULT_WAVE = 10          # Claude Code runs at most 10 tool calls at once by d
 ROOT = ".arena"
 LATEST = "LATEST"
 STATE_FILE = "arena.json"
-PHASES = ("spawn", "attack", "defend", "judge", "final")
-TEMPLATES = ("competitor", "attacker", "defender", "judge", "final")
+PHASES = ("spawn", "attack", "defend", "judge", "synth", "synthjudge", "final")
+TEMPLATES = ("competitor", "attacker", "defender", "judge", "synth", "synthjudge", "final")
+JUDGES = ("judge", "synthjudge", "final")   # job kinds, and the phases that run them
 CALLS_BEFORE_JUDGING = 4   # 2 attacks, 2 defenses per match
 PANEL_ROUNDS = 2           # the last rounds, where one wrong verdict costs the most
 PANEL_JUDGES = 3
@@ -264,6 +265,14 @@ def final_out(d):
     return os.path.join(d, "final.verdict.json")
 
 
+def synth_out(d):
+    return os.path.join(d, "synth", "merged.md")
+
+
+def synth_verdict_out(d, k):
+    return os.path.join(d, "synth", "verdict%d.json" % k)
+
+
 def prompt_path(d, rnd, job_id):
     sub = "final" if rnd is None else "r%d" % rnd
     return os.path.join(d, "prompts", sub, job_id + ".md")
@@ -446,6 +455,43 @@ def alive_ids(state):
     return sorted(a for a, v in state["agents"].items() if v["alive"])
 
 
+# ---------------------------------------------------------------- synthesis
+
+def runners_up(state):
+    """The agents eliminated in the last two rounds, latest first: the finalist and the
+    semifinalists. The synthesis editor borrows from these."""
+    last = rounds_played(state)
+    out = [(-v["eliminated_in"], aid) for aid, v in state["agents"].items()
+           if v["eliminated_in"] is not None and v["eliminated_in"] >= last - 1]
+    return [aid for _, aid in sorted(out)]
+
+
+def synth_labels(state):
+    """Which blind label, X or Y, is the champion as it won and which the edited version."""
+    x = "champion" if random.Random("arena-synth:%s" % state["seed"]).random() < 0.5 else "merged"
+    return {"X": x, "Y": "merged" if x == "champion" else "champion"}
+
+
+def synth_open(state):
+    syn = state.get("synth")
+    return bool(state["champion"] and syn is not None and not syn.get("result"))
+
+
+def synth_unchanged(state):
+    """True when the editor handed back the champion as it was: there is nothing to judge."""
+    def text(path):
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read().strip()
+    return text(synth_out(state["dir"])) == text(state["agents"][state["champion"]]["solution"])
+
+
+def champion_solution(state):
+    """The solution that leaves the arena: the edited one if it beat the champion."""
+    if ((state.get("synth") or {}).get("result") or {}).get("better") == "merged":
+        return synth_out(state["dir"])
+    return state["agents"][state["champion"]]["solution"]
+
+
 # ---------------------------------------------------------------- verdicts
 
 _WEIGHT_RE = re.compile(r"^\| (\w+) \| (\d+) \|", re.M)
@@ -570,12 +616,61 @@ def decide(verdict, a, b, weights):
     return winner, totals, note
 
 
+def _xy_verdict(path, weights):
+    """A blind X/Y verdict, decided by the rubric. Returns (verdict, winner label, totals, note)."""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        v = extract_json(fh.read())
+    if isinstance(v, dict) and isinstance(v.get("scores"), dict):
+        v = dict(v, scores={str(k).strip().lower(): s for k, s in v["scores"].items()})
+    return (v,) + decide(v, "x", "y", weights)
+
+
+def collect_synth(state):
+    syn = state["synth"]
+    if not runners_up(state):
+        syn["result"] = {"better": "champion", "reason": "no runners-up to borrow from"}
+        return [("synth", "recorded", syn["result"]["reason"])]
+    if not _has_output(synth_out(state["dir"])):
+        return [("synth", "missing", "")]
+    if synth_unchanged(state):
+        syn["result"] = {"better": "champion", "reason": "the editor found nothing worth taking"}
+        return [("synth", "recorded", syn["result"]["reason"])]
+    labels = synth_labels(state)
+    verdicts, results = [], []
+    for k in range(1, PANEL_JUDGES + 1):
+        path = synth_verdict_out(state["dir"], k)
+        if not _has_output(path):
+            results.append(("synth.judge%d" % k, "missing", ""))
+            continue
+        try:
+            verdicts.append(_xy_verdict(path, state["weights"]))
+        except ArenaError as e:
+            os.replace(path, path + ".unreadable")
+            results.append(("synth.judge%d" % k, "unreadable", str(e)))
+    if results:
+        return results
+    merged_votes = sum(1 for _, w, _, _ in verdicts if labels[w.upper()] == "merged")
+    better = "merged" if merged_votes * 2 > len(verdicts) else "champion"
+    v = next(x[0] for x in verdicts if labels[x[1].upper()] == better)
+    totals = {}
+    for label, who in labels.items():
+        given = [t[label.lower()] for _, _, t, _ in verdicts if t[label.lower()] is not None]
+        totals[who] = round(sum(given) / len(given), 2) if given else None
+    votes = merged_votes if better == "merged" else len(verdicts) - merged_votes
+    syn["result"] = {"better": better, "votes": "%d-%d" % (votes, len(verdicts) - votes),
+                     "champion_total": totals["champion"], "merged_total": totals["merged"],
+                     "reason": str(v.get("reason") or "")[:400]}
+    return [("synth", "recorded", "%s is better, %s" % (better, syn["result"]["votes"]))]
+
+
 def collect(state):
-    """Record every verdict the judges have written for the open round (or the final
-    check). An unreadable verdict is set aside as <name>.unreadable so the judge job
-    shows up as missing again and gets re-run."""
+    """Record every verdict the judges have written for the open round (or the synthesis
+    or the final check). An unreadable verdict is set aside as <name>.unreadable so the
+    judge job shows up as missing again and gets re-run."""
     d = state["dir"]
     results = []
+    if synth_open(state):
+        return collect_synth(state)
     if state["champion"]:
         fin = state.get("final")
         if not fin or fin.get("result"):
@@ -583,12 +678,8 @@ def collect(state):
         path = final_out(d)
         if not _has_output(path):
             return [("final", "missing", "")]
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            v = extract_json(fh.read())
         try:
-            if isinstance(v, dict) and isinstance(v.get("scores"), dict):
-                v = dict(v, scores={str(k).strip().lower(): s for k, s in v["scores"].items()})
-            w, totals, note = decide(v, "x", "y", state["weights"])
+            v, w, totals, note = _xy_verdict(path, state["weights"])
         except ArenaError as e:
             os.replace(path, path + ".unreadable")
             return [("final", "unreadable", str(e))]
@@ -668,6 +759,16 @@ def phase_jobs(state, phase):
         fin = state.get("final")
         if state["champion"] and fin and not fin.get("result"):
             jobs.append({"id": "final.judge", "kind": "final", "round": None, "outputs": [final_out(d)]})
+    elif phase == "synth":
+        if synth_open(state) and runners_up(state):
+            jobs.append({"id": "synth.merge", "kind": "synth", "round": None, "outputs": [synth_out(d)]})
+    elif phase == "synthjudge":
+        if synth_open(state) and runners_up(state) and _has_output(synth_out(d)) and not synth_unchanged(state):
+            # Like a panel: the judges alternate which version they read first.
+            for k in range(1, PANEL_JUDGES + 1):
+                first, second = ("X", "Y") if k % 2 else ("Y", "X")
+                jobs.append({"id": "synth.judge%d" % k, "kind": "synthjudge", "round": None,
+                             "a": first, "b": second, "outputs": [synth_verdict_out(d, k)]})
     else:
         rd = current_round(state)
         if rd is None:
@@ -708,12 +809,12 @@ def fail_job(state, job_id):
     can move on. A failed defense keeps the solution as it was. Judges are refused:
     a match is only ever decided by a judge. Returns (job, paths written)."""
     job = None
-    for phase in ("spawn", "attack", "defend"):
+    for phase in ("spawn", "attack", "defend", "synth"):
         job = next((j for j in phase_jobs(state, phase) if j["id"] == job_id), None)
         if job:
             break
     if job is None:
-        if any(j["id"] == job_id for phase in ("judge", "final") for j in phase_jobs(state, phase)):
+        if any(j["id"] == job_id for phase in JUDGES for j in phase_jobs(state, phase)):
             raise ArenaError("%s is a judge. Never decide a match yourself: give it a fresh run" % job_id)
         raise ArenaError("no open job called '%s'" % job_id)
     written = []
@@ -723,6 +824,9 @@ def fail_job(state, job_id):
         body = "NO OUTPUT\n"
         if job["kind"] == "defender" and i == 1:
             with open(state["agents"][job["agent"]]["solution"], encoding="utf-8", errors="replace") as fh:
+                body = fh.read()
+        if job["kind"] == "synth":
+            with open(state["agents"][state["champion"]]["solution"], encoding="utf-8", errors="replace") as fh:
                 body = fh.read()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:
@@ -815,7 +919,7 @@ def render_job(state, job, templates, task):
                  own_solution=agents[me]["solution"],
                  attacks=attack_out(d, job["round"], job["match"], opp),
                  defense_out=job["outputs"][0], solution_out=job["outputs"][1])
-    if kind in ("judge", "final"):
+    if kind in JUDGES:
         v["scores_blank"] = "{%s, \"fatal\": false}" % ", ".join("\"%s\": 0" % k for k, _ in state["weights"])
     if kind == "judge":
         n, mid, a, b = job["round"], job["match"], job["a"], job["b"]
@@ -826,6 +930,19 @@ def render_job(state, job, templates, task):
                  first_words=_words(revised_out(d, n, mid, a)), second_words=_words(revised_out(d, n, mid, b)),
                  first_words_before=_words(agents[a]["solution"]),
                  second_words_before=_words(agents[b]["solution"]),
+                 out=job["outputs"][0])
+    elif kind == "synth":
+        champ, last = state["champion"], rounds_played(state)
+        m = next(m for m in state["rounds"][last - 1]["matches"] if champ in (m["a"], m["b"]))
+        v.update(rounds=last, out=job["outputs"][0], champion_solution=agents[champ]["solution"],
+                 runners_up="\n".join("- %s" % agents[aid]["solution"] for aid in runners_up(state)),
+                 verdicts="\n".join("- %s" % verdict_out(d, last, m["id"], k)
+                                    for k in range(1, judges_in(state["agents_n"], last) + 1)))
+    elif kind == "synthjudge":
+        a, b = job["a"], job["b"]
+        path = lambda label: os.path.join(d, "synth", label + ".md")
+        v.update(first=a, second=b, first_solution=path(a), second_solution=path(b),
+                 first_words=_words(path(a)), second_words=_words(path(b)), job=job["id"],
                  out=job["outputs"][0])
     elif kind == "final":
         v.update(rounds=rounds_played(state),
@@ -850,26 +967,37 @@ def write_prompts(state, phase):
     if phase == "spawn":
         for aid in state["agents"]:
             os.makedirs(os.path.join(state["dir"], "scratch", aid), exist_ok=True)
-    if phase == "final":
-        # Blind copies: the final judge sees X and Y, never which one is the champion.
-        fin = state["final"]
-        sources = {"champion": state["agents"][state["champion"]]["solution"],
-                   "baseline": os.path.join(state["dir"], "baseline.md")}
-        os.makedirs(os.path.join(state["dir"], "final"), exist_ok=True)
+    if phase in ("final", "synthjudge"):
+        # Blind copies: the judges see X and Y, never which one is the champion.
+        if phase == "final":
+            labels = state["final"]
+            sources = {"champion": champion_solution(state), "baseline": os.path.join(state["dir"], "baseline.md")}
+        else:
+            labels = synth_labels(state)
+            sources = {"champion": state["agents"][state["champion"]]["solution"], "merged": synth_out(state["dir"])}
+        folder = os.path.join(state["dir"], "final" if phase == "final" else "synth")
+        os.makedirs(folder, exist_ok=True)
         for label in ("X", "Y"):
-            with open(sources[fin[label]], encoding="utf-8", errors="replace") as src, \
-                    open(os.path.join(state["dir"], "final", label + ".md"), "w", encoding="utf-8") as dst:
+            with open(sources[labels[label]], encoding="utf-8", errors="replace") as src, \
+                    open(os.path.join(folder, label + ".md"), "w", encoding="utf-8") as dst:
                 dst.write(src.read())
     return jobs
 
 
 def next_action(state):
     """(phase, jobs_left, jobs_total). phase is one of spawn, attack, defend, judge,
-    final, collect, advance, done."""
+    synth, synthjudge, final, collect, advance, done."""
     spawn = phase_jobs(state, "spawn")
     left = missing_jobs(spawn)
     if left:
         return "spawn", left, spawn
+    if synth_open(state):
+        for phase in ("synth", "synthjudge"):
+            jobs = phase_jobs(state, phase)
+            left = missing_jobs(jobs)
+            if left:
+                return phase, left, jobs
+        return "collect", [], []
     if state["champion"]:
         fin = state.get("final")
         if fin and not fin.get("result"):
@@ -985,7 +1113,7 @@ def job_argv(state, job, claude, rules):
             "--no-session-persistence", "--output-format", "json"]
     if rules:
         argv += ["--append-system-prompt", rules]
-    model = state.get("models", {}).get("judge" if job["kind"] in ("judge", "final") else "competitor")
+    model = state.get("models", {}).get("judge" if job["kind"] in JUDGES else "competitor")
     if model:
         argv += ["--model", model]
     return argv
@@ -1050,7 +1178,7 @@ def run_arena(run_dir, claude, parallel, timeout):
         write_prompts(state, phase)
         todo = []
         for j in left:
-            judge = j["kind"] in ("judge", "final")
+            judge = j["kind"] in JUDGES
             if tries[j["id"]] < (JUDGE_TRIES if judge else 2):
                 todo.append(j)
             elif judge:
@@ -1078,7 +1206,7 @@ def run_arena(run_dir, claude, parallel, timeout):
                     p.kill()
                 raise
         if todo:
-            where = "spawn" if phase == "spawn" else ("final" if phase == "final" else "round %d %s" % (rd["n"], phase))
+            where = "round %d %s" % (rd["n"], phase) if phase in ("attack", "defend", "judge") else phase
             gone = len(missing_jobs(todo))
             print("%s: %d job(s) in %ds%s" % (where, len(todo), time.time() - start,
                                              ", %d without output" % gone if gone else ""), flush=True)
@@ -1172,18 +1300,26 @@ def cmd_init(args):
     state["weights"] = weights
     state["models"] = {"competitor": args.model, "judge": args.judge_model or args.model}
     state["workdir"] = os.getcwd()
+    state["synth"] = {"result": None} if args.synth else None
     save_state(state)
     if default_dir:
         os.makedirs(ROOT, exist_ok=True)
         with open(os.path.join(ROOT, LATEST), "w", encoding="utf-8") as fh:
             fh.write(d + "\n")
     t = plan_totals(n, args.wave)
+    extras, calls, waves = [], t["calls"], t["waves"]
+    if args.synth and n > 1:
+        extras.append("the synthesis")
+        calls, waves = calls + 1 + PANEL_JUDGES, waves + 2
+    if baseline:
+        extras.append("the final check")
+        calls, waves = calls + 1, waves + 1
     print("arena ready: %s" % d)
     print("seed %s. %d agents, %d distinct cards dealt from %d, no repeats."
           % (seed, n, n, combo_count(data)))
     print("%d rounds (%s). %d sub-agent calls in %d waves of %d%s."
-          % (t["rounds"], " -> ".join(str(s) for s in bracket_sizes(n)), t["calls"] + (1 if baseline else 0),
-             t["waves"] + (1 if baseline else 0), args.wave, ", including the final check" if baseline else ""))
+          % (t["rounds"], " -> ".join(str(s) for s in bracket_sizes(n)), calls, waves, args.wave,
+             ", including " + " and ".join(extras) if extras else ""))
     print("next: %s" % _cmd(state["dir"], "next"))
     return 0
 
@@ -1224,7 +1360,7 @@ def cmd_prompts(args):
     left = missing_jobs(jobs)
     w = state["wave"]
     rd = current_round(state)
-    where = "round 0" if args.phase == "spawn" else ("final" if args.phase == "final" else "round %d" % rd["n"])
+    where = "round 0" if args.phase == "spawn" else ("round %d" % rd["n"] if rd else "after the bracket")
     waves = [left[i:i + w] for i in range(0, len(left), w)]
     print("%s, %s: %d job(s), %d still to run, %d wave(s) of up to %d"
           % (where, args.phase, len(jobs), len(left), len(waves), w))
@@ -1236,7 +1372,7 @@ def cmd_prompts(args):
         print("")
         print("Each job is one Agent call: subagent_type arena-worker (see SKILL.md step 4), description")
         print("\"arena <job id>\", prompt \"Read <prompt path> and follow it exactly. It is your whole brief.\"")
-        model = state.get("models", {}).get("judge" if args.phase in ("judge", "final") else "competitor")
+        model = state.get("models", {}).get("judge" if args.phase in JUDGES else "competitor")
         if model:
             print("model: %s, on every Agent call in this phase." % model)
         print("A wave is one message with all of its Agent calls. Let it finish before the next wave.")
@@ -1391,9 +1527,9 @@ def winner_report(state):
                              "reason": m.get("reason"), "survived": m.get("survived") or []})
                 survived.extend(m.get("survived") or [])
     return {"champion": champ, "card": agent["card"], "card_line": _card_line(agent["card"]),
-            "solution": agent["solution"], "rounds": rounds_played(state), "agents": state["agents_n"],
-            "matches_won": sum(1 for p in path if not p["bye"]), "path": path,
-            "attacks_survived": survived, "final": (state.get("final") or {}).get("result")}
+            "solution": champion_solution(state), "rounds": rounds_played(state), "agents": state["agents_n"],
+            "matches_won": sum(1 for p in path if not p["bye"]), "path": path, "attacks_survived": survived,
+            "synth": (state.get("synth") or {}).get("result"), "final": (state.get("final") or {}).get("result")}
 
 
 def cmd_winner(args):
@@ -1420,6 +1556,14 @@ def cmd_winner(args):
               % (p["round"], p["beat"], _fmt(p["score"]), _fmt(p["opponent_score"]), p["reason"] or ""))
         for s in p["survived"]:
             print("           survived: %s" % s)
+    syn = rep["synth"]
+    if syn and "votes" in syn:
+        print("synthesis: %s, judges %s, edited %s to as won %s. %s"
+              % ("the edited version beat the champion as it won" if syn["better"] == "merged"
+                 else "the champion as it won beat the edited version",
+                 syn["votes"], _fmt(syn["merged_total"]), _fmt(syn["champion_total"]), syn["reason"]))
+    elif syn:
+        print("synthesis: kept the champion as it won, %s" % syn["reason"])
     fin = rep["final"]
     if fin:
         verdict = ("the winner beats it" if fin["better"] == "champion"
@@ -1490,6 +1634,8 @@ def build_parser():
     s.add_argument("--rubric", help="score with rubric-<name>.md instead of rubric.md, e.g. creative")
     s.add_argument("--model", help="the Agent model for every sub-agent, e.g. sonnet (default: the session's)")
     s.add_argument("--judge-model", help="the Agent model for judges and the final check (default: --model)")
+    s.add_argument("--synth", action="store_true",
+                   help="after the bracket, let an editor borrow from the runners-up; 3 blind judges keep the better version")
     s.add_argument("--wave", type=int, default=DEFAULT_WAVE, help="parallel sub-agents per wave (default 10)")
     s.set_defaults(func=cmd_init)
 

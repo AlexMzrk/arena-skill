@@ -580,6 +580,13 @@ elif job["kind"] == "defender":
     put(job["outputs"][1], "revised by %%s" %% job["agent"])
 elif job["kind"] == "judge":
     put(job["outputs"][0], json.dumps({"scores": {job["a"]: dict(s, correctness=9), job["b"]: s}, "winner": job["a"]}))
+elif job["kind"] == "synth":
+    champ = state["agents"][state["champion"]]["solution"]
+    put(job["outputs"][0], open(champ).read() if os.environ.get("FAKE_SYNTH_SAME") else "merged by the editor")
+elif job["kind"] == "synthjudge":
+    x = "merged" in open(os.path.join(d, "synth", "X.md")).read()
+    good, bad = ("X", "Y") if x else ("Y", "X")
+    put(job["outputs"][0], json.dumps({"scores": {good: dict(s, correctness=9), bad: s}, "winner": good}))
 else:
     put(job["outputs"][0], json.dumps({"scores": {"X": dict(s, correctness=9), "Y": s}, "winner": "X"}))
 print(json.dumps([{"type": "system"}, {"type": "result", "total_cost_usd": 0.01, "permission_denials": []}]))
@@ -597,10 +604,10 @@ class HeadlessRun(TempDir):
         self.log = os.path.join(self.tmp, "calls.jsonl")
         self.d = os.path.join(self.tmp, "run")
 
-    def run_arena(self, *init, fail="", lack=""):
+    def run_arena(self, *init, fail="", lack="", same=""):
         if not os.path.exists(os.path.join(self.d, "arena.json")):
             self.ok("init", "--seed", 3, "--task", "t", "--dir", self.d, *init)
-        env = dict(os.environ, FAKE_LOG=self.log, FAKE_FAIL=fail, FAKE_LACK=lack)
+        env = dict(os.environ, FAKE_LOG=self.log, FAKE_FAIL=fail, FAKE_LACK=lack, FAKE_SYNTH_SAME=same)
         return subprocess.run([sys.executable, BRACKET, "run", "--dir", self.d, "--claude", self.fake, "--parallel", "4"],
                               capture_output=True, text=True, env=env)
 
@@ -646,6 +653,51 @@ class HeadlessRun(TempDir):
         r = self.run_arena()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertTrue(load(self.d)["champion"])
+
+    def test_synthesis_that_wins_goes_to_the_final_check(self):
+        base = os.path.join(self.tmp, "old.md")
+        write(base, "old answer")
+        r = self.run_arena("--agents", 5, "--baseline-file", base, "--synth", "--judge-model", "opus")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        state = load(self.d)
+        self.assertEqual(state["synth"]["result"]["better"], "merged")
+        self.assertEqual(state["synth"]["result"]["votes"], "3-0")
+        jobs = [c["job"] for c in self.calls()]
+        self.assertEqual(len(jobs), B.plan_totals(5)["calls"] + 1 + 3 + 1)
+        self.assertLess(jobs.index("synth.judge3"), jobs.index("final.judge"))
+        judge = next(c["argv"] for c in self.calls() if c["job"] == "synth.judge1")
+        self.assertEqual(judge[judge.index("--model") + 1], "opus")
+        brief = read(B.prompt_path(self.d, None, "synth.merge"))
+        runners = B.runners_up(state)
+        self.assertEqual(len(runners), 2, "5 agents: one out in each of the last two rounds")
+        for aid in runners:
+            self.assertIn(state["agents"][aid]["solution"], brief)
+        self.assertNotIn(state["champion"] + ".", brief.split("runners-up, latest")[1].split("The judges")[0])
+        finalists = {read(os.path.join(self.d, "final", f)) for f in ("X.md", "Y.md")}
+        self.assertEqual(finalists, {"merged by the editor", "old answer\n"})
+        rep = json.loads(self.ok("winner", "--json", "--dir", self.d))
+        self.assertEqual(rep["solution"], B.synth_out(self.d))
+        self.assertIn("synthesis: the edited version beat the champion", self.ok("winner", "--dir", self.d))
+
+    def test_an_edit_that_changes_nothing_is_not_judged(self):
+        r = self.run_arena("--agents", 4, "--synth", same="1")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("synth.judge1", [c["job"] for c in self.calls()])
+        state = load(self.d)
+        self.assertEqual(state["synth"]["result"]["better"], "champion")
+        self.assertEqual(B.winner_report(state)["solution"], state["agents"][state["champion"]]["solution"])
+
+    def test_a_failed_edit_keeps_the_champion(self):
+        r = self.run_arena("--agents", 4, "--synth", fail="synth.merge")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("got stand-ins: synth.merge", r.stdout)
+        self.assertEqual(load(self.d)["synth"]["result"]["better"], "champion")
+
+    def test_one_agent_has_nobody_to_borrow_from(self):
+        r = self.run_arena("--agents", 1, "--synth")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([c["job"] for c in self.calls()], ["a001.spawn"])
+        self.assertEqual(load(self.d)["synth"]["result"]["reason"], "no runners-up to borrow from")
 
     def test_an_old_cli_is_refused_before_anything_runs(self):
         r = self.run_arena("--agents", 2, lack="--safe-mode")

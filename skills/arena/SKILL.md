@@ -53,6 +53,7 @@ Read the flags out of the request. Everything that is not a flag is the task.
 | `--seed S` | Fixes the cards and the pairings. Default: random, and recorded. |
 | `--wave W` | Sub-agents per wave. Default 10. Only raise it if the user raised Claude Code's limit. |
 | `--headless` | Run the tournament outside the chat with `ARENA run`, one `claude -p` process per job. See step 4. |
+| `--synth` | After the bracket, an editor improves the champion with what the runners-up did better, and 3 blind judges keep the better version. 4 more calls. |
 
 No task text at all means: the task is the user's most recent request in this conversation, and your
 last answer to it is the baseline to beat.
@@ -108,6 +109,9 @@ under attack: code, plans, analysis, anything with a right answer. When taste de
 (headlines, copy, names, taglines, stories), pass `--rubric creative`: under the default rubric the
 safest, blandest answer survives, because it gives attackers the least to hit. The user's own
 `--rubric` flag always wins.
+
+Pass `--synth` only when the user asked for it. With the creative rubric, do not suggest it: merging
+tends to average out exactly the distinctiveness that rubric rewards.
 
 ## Step 3: init
 
@@ -169,6 +173,9 @@ The order `next` takes you through:
 - then every round: **attack** (two per match) → **defend** (two per match) → **judge** (one per
   match, and in the last two rounds three, whose majority decides) → `ARENA collect` →
   `ARENA advance`.
+- **synth** and **synthjudge**, once, only with `--synth`: an editor writes the champion improved
+  with what the runners-up did better, then three judges compare it blind with the champion as it
+  won. If the editor changed nothing, there is nothing to judge. Then `ARENA collect`.
 - **final**, once, only when there is a baseline: a judge compares the champion with the answer the
   user rejected, blind to which is which. Then `ARENA collect`.
 - `next` prints DONE: go to step 5.
@@ -191,8 +198,10 @@ solution file you read in the whole run. Give the user:
 3. **Rounds**: for example "7 rounds, 100 agents in, 1 left."
 4. **Against the answer you rejected**, if there was one: the final check's scores, honestly. If the
    old answer scored higher, say so plainly and show both.
-5. Where the full record lives: the run folder.
-6. With `--headless`: the cost line `run` printed, and every job it says was refused a tool call or
+5. **The synthesis**, with `--synth`: one line from `winner`, saying whether the edited version beat
+   the champion as it won, and by how many judges.
+6. Where the full record lives: the run folder.
+7. With `--headless`: the cost line `run` printed, and every job it says was refused a tool call or
    got a stand-in.
 
 If the solution changes files in the user's project, do not apply it. Ask: apply it, or change it?

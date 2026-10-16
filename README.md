@@ -73,6 +73,7 @@ answer, make them compete". When it starts itself like that, it asks before it s
 | `--seed S` | Same seed, same cards and same bracket. Default random, and recorded. |
 | `--wave W` | Sub-agents per wave. Default 10. Only raise it if you raised Claude Code's limit. |
 | `--headless` | Run the tournament outside the chat, one `claude -p` process per job. See below. |
+| `--synth` | After the bracket, borrow what the runners-up did better. Kept only if blind judges prefer it. |
 
 ## How it works
 
@@ -104,7 +105,12 @@ answer, make them compete". When it starts itself like that, it asks before it s
    safest, blandest answer does not win just because it gives attackers the least to hit.
 5. **Repeat.** The survivors carry their revised solutions into the next round. An odd number means
    one bye, never to the same agent twice while anyone else is waiting for one.
-6. **Result.** One solution left. You get it, the attacks it survived, its card and the round count.
+6. **Synthesis**, with `--synth`. Single elimination throws the losers away whole, even the one
+   thing a runner-up did better. An editor takes the champion and brings in what the finalist and
+   semifinalists did better, keeping the champion's approach. Three judges then compare the edit
+   with the champion as it won, blind, and the majority decides which one leaves the arena. If the
+   editor finds nothing worth taking, nothing is judged. 4 more calls.
+7. **Result.** One solution left. You get it, the attacks it survived, its card and the round count.
    If you started from an answer you rejected, a last judge compares the winner with it blind and
    the skill tells you the score, even when the old answer wins.
 
