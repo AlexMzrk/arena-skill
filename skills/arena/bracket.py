@@ -758,6 +758,13 @@ def _card_values(card):
     }
 
 
+def _words(path):
+    if not os.path.isfile(path):
+        return 0
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return len(fh.read().split())
+
+
 def render_job(state, job, templates, task):
     d = state["dir"]
     agents = state["agents"]
@@ -766,7 +773,14 @@ def render_job(state, job, templates, task):
     if kind == "competitor":
         aid = job["agent"]
         v.update(_card_values(agents[aid]["card"]))
-        if state.get("has_baseline"):
+        # Half the field never sees the rejected answer, so it cannot pull all of them toward it.
+        if state.get("has_baseline") and int(aid[1:]) % 2 == 0:
+            v["baseline_note"] = (
+                "The user already got an answer to this task and was NOT satisfied with it. The task "
+                "says what they disliked about it. You are not shown that answer, so that you start "
+                "fresh instead of from it: do not look for it. The winner of this arena is compared "
+                "with it at the end.")
+        elif state.get("has_baseline"):
             v["baseline_note"] = (
                 "The user already got an answer to this task and was NOT satisfied with it. It is at "
                 "%s. Read it first and work out exactly why it fell short. Then beat it. Do not just "
@@ -796,6 +810,9 @@ def render_job(state, job, templates, task):
                  first_solution=revised_out(d, n, mid, a), second_solution=revised_out(d, n, mid, b),
                  first_attacks=attack_out(d, n, mid, b), second_attacks=attack_out(d, n, mid, a),
                  first_defense=defense_out(d, n, mid, a), second_defense=defense_out(d, n, mid, b),
+                 first_words=_words(revised_out(d, n, mid, a)), second_words=_words(revised_out(d, n, mid, b)),
+                 first_words_before=_words(agents[a]["solution"]),
+                 second_words_before=_words(agents[b]["solution"]),
                  out=job["outputs"][0])
     elif kind == "final":
         v.update(rounds=rounds_played(state),
@@ -998,6 +1015,7 @@ def cmd_init(args):
     state = new_state(n, seed, data, d, wave=args.wave, has_baseline=bool(baseline))
     state["rubric"] = args.rubric or "default"
     state["weights"] = weights
+    state["models"] = {"competitor": args.model, "judge": args.judge_model or args.model}
     save_state(state)
     if default_dir:
         os.makedirs(ROOT, exist_ok=True)
@@ -1060,8 +1078,11 @@ def cmd_prompts(args):
             print("  %-26s %s" % (j["id"], j["prompt"]))
     if left:
         print("")
-        print("Each job is one Agent call: subagent_type general-purpose, description \"arena <job id>\",")
-        print("prompt \"Read <prompt path> and follow it exactly. It is your whole brief.\"")
+        print("Each job is one Agent call: subagent_type arena-worker (see SKILL.md step 4), description")
+        print("\"arena <job id>\", prompt \"Read <prompt path> and follow it exactly. It is your whole brief.\"")
+        model = state.get("models", {}).get("judge" if args.phase in ("judge", "final") else "competitor")
+        if model:
+            print("model: %s, on every Agent call in this phase." % model)
         print("A wave is one message with all of its Agent calls. Let it finish before the next wave.")
     print("then: %s" % _cmd(state["dir"], "next"))
     return 0
@@ -1289,6 +1310,8 @@ def build_parser():
     s.add_argument("--task", help="the task as a string, instead of --task-file")
     s.add_argument("--baseline-file", help="the answer the user was not satisfied with")
     s.add_argument("--rubric", help="score with rubric-<name>.md instead of rubric.md, e.g. creative")
+    s.add_argument("--model", help="the Agent model for every sub-agent, e.g. sonnet (default: the session's)")
+    s.add_argument("--judge-model", help="the Agent model for judges and the final check (default: --model)")
     s.add_argument("--wave", type=int, default=DEFAULT_WAVE, help="parallel sub-agents per wave (default 10)")
     s.set_defaults(func=cmd_init)
 

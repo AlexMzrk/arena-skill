@@ -10,7 +10,7 @@ description: >-
   to make answers compete or to run a tournament over them, or has rejected
   answers to the same request more than once and wants more than another
   retry. Not for a single "try again".
-argument-hint: "[--agents N | --full] [--rubric creative] [--seed S] <task>"
+argument-hint: "[--agents N | --full] [--rubric creative] [--model M] [--seed S] <task>"
 ---
 
 # arena
@@ -48,6 +48,8 @@ Read the flags out of the request. Everything that is not a flag is the task.
 | `--full` | 100 competitors. For the answer that matters. |
 | `--quick` | 16 competitors, the same as the default. |
 | `--rubric creative` | Score with `rubric-creative.md`. See step 2 for when to pick it yourself. |
+| `--model M` | The model for every sub-agent, as the Agent tool names it (`sonnet`, `opus`, `haiku`). Default: the session's. |
+| `--judge-model M` | The model for judges and the final check. Default: `--model`. |
 | `--seed S` | Fixes the cards and the pairings. Default: random, and recorded. |
 | `--wave W` | Sub-agents per wave. Default 10. Only raise it if the user raised Claude Code's limit. |
 
@@ -83,7 +85,14 @@ on its own:
 - The context a stranger would need: absolute paths of the files that matter, pasted data, what the
   product is, the conventions in the codebase.
 - What "done" looks like, if the user said.
-- If there is an answer to beat: what the user disliked about it, in their words.
+- If there is an answer to beat: what the user disliked about it, in their words, and concretely
+  enough to act on. Half the competitors never see the old answer, only this.
+
+When the task is about code or other files in the user's project, end the task file with a
+`## Context` section: the parts of those files the task depends on, copied word for word, each
+under its absolute path and line range. Facts only, with no word on what is wrong or how to fix it.
+Without it every competitor reads the same files from scratch; with it they all start from the same
+facts and can still open the files for more. Copy what the task needs, not whole large files.
 
 Do not add requirements the user never gave. Do not write your own view of the right answer into it:
 that pushes 100 agents the same way, which is the opposite of the point.
@@ -100,11 +109,11 @@ safest, blandest answer survives, because it gives attackers the least to hit. T
 ## Step 3: init
 
 ```bash
-ARENA init --agents N --seed S --task-file .arena/task.md --baseline-file .arena/baseline.md --rubric creative
+ARENA init --agents N --seed S --task-file .arena/task.md --baseline-file .arena/baseline.md --rubric creative --model M --judge-model M
 ```
 
-Leave out `--baseline-file` when there is nothing to beat, `--rubric` for the default rubric, and
-`--seed` to get a random one. `init`
+Leave out `--baseline-file` when there is nothing to beat, `--rubric` for the default rubric,
+`--model` and `--judge-model` unless the user gave them, and `--seed` to get a random one. `init`
 copies the task into the run folder, deals every competitor a different strategy card with no
 repeats, pairs round 1, and writes `arena.json`.
 
@@ -123,6 +132,7 @@ Every phase that runs sub-agents works the same way:
      folder), else `general-purpose`. The worker cannot edit files, only write new ones.
    - `description`: `arena <job id>`
    - `prompt`: `Read <prompt path> and follow it exactly. It is your whole brief.`
+   - `model`: the one `prompts` prints on its `model:` line. No such line: leave `model` out.
    - `run_in_background`: false, where the tool has that option, so the wave comes back together.
 
    Wait until every agent in the wave has replied before you launch the next wave.

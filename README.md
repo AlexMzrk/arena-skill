@@ -68,6 +68,8 @@ answer, make them compete". When it starts itself like that, it asks before it s
 | `--full` | 100 competitors. For the answer that matters. |
 | `--quick` | 16 competitors, the same as the default. |
 | `--rubric creative` | Score on fit, impact and distinctiveness instead of correctness. For copy, names, headlines. |
+| `--model M` | The model for every sub-agent: `sonnet`, `opus` or `haiku`. Default: the one you are running. |
+| `--judge-model M` | The model for the judges only. Default: `--model`. |
 | `--seed S` | Same seed, same cards and same bracket. Default random, and recorded. |
 | `--wave W` | Sub-agents per wave. Default 10. Only raise it if you raised Claude Code's limit. |
 
@@ -79,13 +81,16 @@ answer, make them compete". When it starts itself like that, it asks before it s
    thinking and more), 12 workflows (draft, critique, rewrite; outline first; test first; research,
    then synthesise; three drafts, pick one...) and 12 strategies (simplest thing that works, maximal
    rigour, user empathy first, edge cases first, speed...). That is 2,160 different cards. The
-   dealer gives each agent its own, with no repeats.
+   dealer gives each agent its own, with no repeats. When there is an answer you rejected, half of
+   them read it and half get only what you disliked about it, so it cannot pull the whole field
+   toward it.
 2. **Attack.** Solutions are paired, and the pairing avoids putting two agents with the same
    reasoning mode against each other. Each side attacks the other's solution through its own card:
    what is wrong, what requirement it missed, the exact input that breaks it. Up to 7 attacks,
    labelled FATAL, MAJOR or MINOR.
 3. **Defend.** Each side answers every attack it took, conceding or rebutting with evidence, then
-   rewrites its solution to fix everything it conceded.
+   rewrites its solution to fix everything it conceded, without letting it grow: the judge sees how
+   many words each solution gained.
 4. **Judge.** A separate judge sub-agent reads both revised solutions, checks every attack itself
    against both of them, and scores both on [the rubric](skills/arena/rubric.md): correctness 30,
    completeness against the task 25, robustness to the attacks raised 20, specificity 15, clarity
@@ -139,7 +144,8 @@ The skill is free. The tokens are yours, and 100 agents is a lot of them.
 
 Add one call when there is a rejected answer to beat. Every call reads the task and one or two
 solutions, so the bill grows with the size of the task. The default 16 covers everyday things.
-Save `--full` for the answer that matters. The skill prints these numbers before it starts, and `python3 skills/arena/bracket.py plan --agents N` prints them any time.
+Save `--full` for the answer that matters. `--model sonnet --judge-model opus` runs the
+competitors on a cheaper model and keeps the strongest one for the verdicts. The skill prints these numbers before it starts, and `python3 skills/arena/bracket.py plan --agents N` prints them any time.
 
 ## The tool
 
@@ -147,7 +153,7 @@ Save `--full` for the answer that matters. The skill prints these numbers before
 
 ```bash
 python3 bracket.py plan --agents 100        # rounds, calls, waves. Writes nothing
-python3 bracket.py init --agents 100 --seed 7 --task-file task.md [--baseline-file old.md] [--rubric creative]
+python3 bracket.py init --agents 100 --seed 7 --task-file task.md [--baseline-file old.md] [--rubric creative] [--model M] [--judge-model M]
 python3 bracket.py next                     # what to do now, with the exact command
 python3 bracket.py prompts attack           # write every sub-agent brief, list the jobs in waves
 python3 bracket.py fail r2-m03.a017.defend  # stand-ins for a job that failed twice (never a judge)

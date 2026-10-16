@@ -7,12 +7,12 @@ You are the judge of match {{match}}, round {{round}}, in an arena. Two solution
 Read the rubric first: {{rubric}}
 
 Solution {{first}}
-- revised solution: {{first_solution}}
+- revised solution: {{first_solution}} ({{first_words}} words, {{first_words_before}} before the defense)
 - attacks it received: {{first_attacks}}
 - its defense: {{first_defense}}
 
 Solution {{second}}
-- revised solution: {{second_solution}}
+- revised solution: {{second_solution}} ({{second_words}} words, {{second_words_before}} before the defense)
 - attacks it received: {{second_attacks}}
 - its defense: {{second_defense}}
 
@@ -22,7 +22,7 @@ How to judge:
 3. Look for flaws the attackers missed, too.
 4. Score each criterion from 0 to 10 using the rubric's anchors. Set fatal to true only for a flaw you have verified that makes the solution wrong or unusable for the task.
 5. The winner is the higher weighted total (the weights are in the rubric). A fatal solution cannot beat one that is not fatal. On an exact tie, fewer standing attacks wins, then the higher score on the rubric's heaviest criterion.
-6. Judge the work, not the writing about the work. Length is not quality. You do not know either competitor's strategy and should not guess it.
+6. Judge the work, not the writing about the work. Length is not quality: words a solution gained in its defense earn credit only for what they fix, and caveats or padding added to dodge attacks earn nothing. You do not know either competitor's strategy and should not guess it.
 7. Do not create, edit or delete any file except the verdict. If the task is code and running something settles an attack, do it only inside {{arena_dir}}/scratch/{{job}}/, never in the user's project.
 
 Write this JSON, and nothing else, to {{out}}:

@@ -15,7 +15,7 @@ The attacks against it: {{attacks}}
 Do this:
 1. Take every attack in turn and decide honestly. CONCEDE if it is right, and fix it. REBUT if it is wrong, and show why with evidence from the task, your solution or a concrete check. A rebuttal that only insists you are right counts as a concession. Conceding a real flaw and fixing it scores better than defending it.
 2. Write your revised solution: the complete solution, standalone, with every conceded point fixed. The judge reads only this file, so never write "see the previous version". Say nothing about the arena or your card.
-3. Fix what was attacked and anything the attacks made you notice. Do not start again from scratch and do not copy your opponent.
+3. Fix what was attacked and anything the attacks made you notice. Do not start again from scratch and do not copy your opponent. Keep it no longer than your current solution unless a fix needs the room: answer an attack by fixing the solution, not by wrapping it in caveats. The judge sees both word counts.
 4. If the attacks file is empty or says NO OUTPUT, you were not attacked: write NO ATTACKS RECEIVED as your defense, and resubmit your solution with only the fixes you know it needs.
 5. Do not create, edit or delete anything outside {{arena_dir}}.
 

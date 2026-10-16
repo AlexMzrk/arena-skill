@@ -506,6 +506,48 @@ class Rubrics(TempDir):
                 B.load_weights(bad)
 
 
+class Briefs(TempDir):
+    def test_half_the_field_never_sees_the_rejected_answer(self):
+        d = os.path.join(self.tmp, "run")
+        base = os.path.join(self.tmp, "old.md")
+        write(base, "The sea is big.")
+        self.ok("init", "--agents", 4, "--seed", 1, "--task", "t", "--baseline-file", base, "--dir", d)
+        self.ok("prompts", "spawn", "--dir", d)
+        for aid, sees in (("a001", True), ("a002", False), ("a003", True), ("a004", False)):
+            brief = read(B.prompt_path(d, 0, aid + ".spawn"))
+            self.assertEqual(os.path.join(d, "baseline.md") in brief, sees, aid)
+            self.assertEqual("You are not shown that answer" in brief, not sees, aid)
+
+    def test_judge_sees_word_counts_before_and_after_the_defense(self):
+        d = os.path.join(self.tmp, "run")
+        self.ok("init", "--agents", 2, "--seed", 1, "--task", "t", "--dir", d)
+        m = load(d)["rounds"][0]["matches"][0]
+        os.makedirs(os.path.join(d, "r0"))
+        os.makedirs(os.path.join(d, "r1"))
+        write(B.spawn_out(d, m["a"]), "one two three")
+        write(B.revised_out(d, 1, m["id"], m["a"]), "one two three four five")
+        write(B.spawn_out(d, m["b"]), "one two")
+        write(B.revised_out(d, 1, m["id"], m["b"]), "one two")
+        self.ok("prompts", "judge", "--dir", d)
+        brief = read(B.prompt_path(d, 1, m["id"] + ".judge1"))
+        self.assertIn("%s (5 words, 3 before the defense)" % B.revised_out(d, 1, m["id"], m["a"]), brief)
+        self.assertIn("%s (2 words, 2 before the defense)" % B.revised_out(d, 1, m["id"], m["b"]), brief)
+
+    def test_models_are_printed_per_phase(self):
+        cases = ((("--model", "sonnet", "--judge-model", "opus"), "model: sonnet", "model: opus"),
+                 (("--model", "haiku"), "model: haiku", "model: haiku"),
+                 ((), None, None))
+        for k, (flags, spawn_line, judge_line) in enumerate(cases):
+            d = os.path.join(self.tmp, "run%d" % k)
+            self.ok("init", "--agents", 2, "--seed", 1, "--task", "t", "--dir", d, *flags)
+            for phase, line in (("spawn", spawn_line), ("judge", judge_line)):
+                out = self.ok("prompts", phase, "--dir", d)
+                if line:
+                    self.assertIn(line + ",", out)
+                else:
+                    self.assertNotIn("model:", out)
+
+
 class Guards(TempDir):
     def test_init_refuses_to_overwrite_and_bad_sizes(self):
         d = os.path.join(self.tmp, "run")
