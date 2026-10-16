@@ -19,6 +19,7 @@ own context gets compacted halfway through a 100-agent run.
     python3 bracket.py status                        # alive and eliminated, per round
     python3 bracket.py winner                        # the survivor, what it beat, the attacks it survived
     python3 bracket.py card <agent_id>               # one competitor's strategy card
+    python3 bracket.py run [--parallel 10]           # run the whole arena outside the chat, with claude -p
 
 Phases, in order: spawn, then per round attack, defend, judge; then final (only when
 there is a rejected answer to beat). Every command takes --dir; without it, the run
@@ -27,11 +28,16 @@ named in .arena/LATEST is used.
 Python 3.8+, standard library only.
 """
 import argparse
+import collections
+import concurrent.futures
 import json
 import math
 import os
 import random
 import re
+import shutil
+import signal
+import subprocess
 import sys
 import time
 
@@ -53,6 +59,13 @@ TEMPLATES = ("competitor", "attacker", "defender", "judge", "final")
 CALLS_BEFORE_JUDGING = 4   # 2 attacks, 2 defenses per match
 PANEL_ROUNDS = 2           # the last rounds, where one wrong verdict costs the most
 PANEL_JUDGES = 3
+DEFAULT_PARALLEL = 10
+DEFAULT_TIMEOUT = 1200     # seconds per sub-agent job in `run`
+JUDGE_TRIES = 3
+WORKER_TOOLS = "Read,Grep,Glob,Write,WebSearch"
+NEEDED_FLAGS = ("--safe-mode", "--tools", "--allowedTools", "--permission-prompts", "--add-dir",
+                "--no-session-persistence", "--output-format", "--append-system-prompt", "--model")
+WORKER_AGENT = os.path.join(os.path.dirname(os.path.dirname(HERE)), "agents", "arena-worker.md")
 
 
 class ArenaError(Exception):
@@ -933,6 +946,148 @@ def _card_line(card):
     return "%s + %s + %s" % (card["reasoning"]["name"], card["workflow"]["name"], card["strategy"]["name"])
 
 
+# ---------------------------------------------------------------- headless runner
+
+def find_claude(given):
+    """The claude CLI to run jobs with, checked for every flag `run` passes it."""
+    path = given or os.environ.get("ARENA_CLAUDE") or shutil.which("claude")
+    if not path or not shutil.which(path):
+        raise ArenaError("no claude CLI found. Pass --claude <path>, or run the arena in the chat")
+    try:
+        p = subprocess.run([path, "--help"], capture_output=True, text=True, timeout=60,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ArenaError("%s --help failed: %s" % (path, e))
+    lacking = [f for f in NEEDED_FLAGS if not re.search(r"(^|\s)%s\b" % re.escape(f), p.stdout)]
+    if lacking:
+        raise ArenaError("%s lacks %s. Update it, or run the arena in the chat" % (path, ", ".join(lacking)))
+    return path
+
+
+def worker_rules():
+    """The worker agent's instructions without its frontmatter, or "" when the skill
+    was installed without the agents folder."""
+    if not os.path.isfile(WORKER_AGENT):
+        return ""
+    with open(WORKER_AGENT, encoding="utf-8") as fh:
+        text = fh.read()
+    parts = text.split("---", 2)
+    return parts[2].strip() if text.startswith("---") and len(parts) == 3 else text.strip()
+
+
+def job_argv(state, job, claude, rules):
+    # Writes are allowed only under the run folder (//abs is an absolute path in a permission
+    # rule); anything else that would ask for permission is refused, since nobody is there to answer.
+    argv = [claude, "-p", "Read %s and follow it exactly. It is your whole brief." % job["prompt"],
+            "--safe-mode", "--tools", WORKER_TOOLS,
+            "--allowedTools", "WebSearch Edit(/%s/**)" % state["dir"],
+            "--add-dir", state["dir"], "--permission-prompts", "none",
+            "--no-session-persistence", "--output-format", "json"]
+    if rules:
+        argv += ["--append-system-prompt", rules]
+    model = state.get("models", {}).get("judge" if job["kind"] in ("judge", "final") else "competitor")
+    if model:
+        argv += ["--model", model]
+    return argv
+
+
+def _result_info(out):
+    """(cost in USD, refused tool calls) from claude -p --output-format json, which is one
+    result object in some versions and a list of messages ending in it in others."""
+    try:
+        data = json.loads(out)
+    except ValueError:
+        return 0.0, 0
+    if isinstance(data, list):
+        data = next((m for m in reversed(data) if isinstance(m, dict) and m.get("type") == "result"), {})
+    if not isinstance(data, dict):
+        return 0.0, 0
+    return float(data.get("total_cost_usd") or 0), len(data.get("permission_denials") or [])
+
+
+def _run_job(argv, cwd, timeout, log, live):
+    with subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True) as p:
+        live.add(p)
+        try:
+            out, err = p.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            out, err = p.communicate()
+            err += "\narena: timed out after %ds\n" % timeout
+        finally:
+            live.discard(p)
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    with open(log, "w", encoding="utf-8") as fh:
+        fh.write(out + ("\n--- stderr\n" + err if err else ""))
+    return _result_info(out)
+
+
+def run_arena(run_dir, claude, parallel, timeout):
+    """Drive the arena to DONE with one claude -p process per job. Only missing outputs are
+    run, so a stopped run picks up where it was. Returns (cost, refused job ids, stand-ins)."""
+    rules = worker_rules()
+    tries = collections.Counter()
+    cost, refused, stand_ins = 0.0, [], []
+    live = set()
+    while True:
+        state = load_state(argparse.Namespace(dir=run_dir))
+        phase, left, _ = next_action(state)
+        rd = current_round(state)
+        if phase == "done":
+            return cost, refused, stand_ins
+        if phase == "collect":
+            for mid, what, note in collect(state):
+                if what != "recorded":
+                    print("  %s %s, judging it again. %s" % (mid, what, note))
+            save_state(state)
+            continue
+        if phase == "advance":
+            survivors = advance(state)
+            save_state(state)
+            print("round %d done: %d of %d left" % (rd["n"], len(survivors), state["agents_n"]), flush=True)
+            continue
+        write_prompts(state, phase)
+        todo = []
+        for j in left:
+            judge = j["kind"] in ("judge", "final")
+            if tries[j["id"]] < (JUDGE_TRIES if judge else 2):
+                todo.append(j)
+            elif judge:
+                raise ArenaError("%s failed %d times, see %s. Run again to retry"
+                                 % (j["id"], JUDGE_TRIES, os.path.join(state["dir"], "logs")))
+            else:
+                fail_job(state, j["id"])
+                stand_ins.append(j["id"])
+        start = time.time()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as pool:
+            futures = {}
+            for j in todo:
+                tries[j["id"]] += 1
+                log = os.path.join(state["dir"], "logs", "%s.try%d.json" % (j["id"], tries[j["id"]]))
+                futures[pool.submit(_run_job, job_argv(state, j, claude, rules),
+                                    state.get("workdir") or os.getcwd(), timeout, log, live)] = j
+            try:
+                for f in concurrent.futures.as_completed(futures):
+                    c, denials = f.result()
+                    cost += c
+                    if denials:
+                        refused.append(futures[f]["id"])
+            except BaseException:
+                for p in list(live):
+                    p.kill()
+                raise
+        if todo:
+            where = "spawn" if phase == "spawn" else ("final" if phase == "final" else "round %d %s" % (rd["n"], phase))
+            gone = len(missing_jobs(todo))
+            print("%s: %d job(s) in %ds%s" % (where, len(todo), time.time() - start,
+                                             ", %d without output" % gone if gone else ""), flush=True)
+
+
+def _stop(signum, frame):
+    raise KeyboardInterrupt
+
+
 # ---------------------------------------------------------------- commands
 
 def _agents_arg(args):
@@ -1016,6 +1171,7 @@ def cmd_init(args):
     state["rubric"] = args.rubric or "default"
     state["weights"] = weights
     state["models"] = {"competitor": args.model, "judge": args.judge_model or args.model}
+    state["workdir"] = os.getcwd()
     save_state(state)
     if default_dir:
         os.makedirs(ROOT, exist_ok=True)
@@ -1286,6 +1442,28 @@ def cmd_card(args):
     return 0
 
 
+def cmd_run(args):
+    state = load_state(args)
+    if args.parallel < 1 or args.timeout < 1:
+        raise ArenaError("--parallel and --timeout must be at least 1")
+    claude = find_claude(args.claude)
+    signal.signal(signal.SIGTERM, _stop)
+    print("running %s: claude -p, %d at a time" % (state["dir"], args.parallel), flush=True)
+    try:
+        cost, refused, stand_ins = run_arena(state["dir"], claude, args.parallel, args.timeout)
+    except KeyboardInterrupt:
+        print("stopped. %s continues where it stopped." % _cmd(state["dir"], "run"))
+        return 130
+    print("DONE. Sub-agent cost about $%.2f at API prices." % cost)
+    if stand_ins:
+        print("%d job(s) failed twice and got stand-ins: %s" % (len(stand_ins), ", ".join(stand_ins)))
+    if refused:
+        print("%d job(s) were refused a tool call, for example a write outside the run folder. Logs: %s. %s"
+              % (len(refused), os.path.join(state["dir"], "logs"), ", ".join(refused)))
+    print("next: %s" % _cmd(state["dir"], "winner"))
+    return 0
+
+
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--dir", help="the arena run directory (default: the one in .arena/LATEST)")
@@ -1356,6 +1534,12 @@ def build_parser():
     s = sub.add_parser("card", parents=[common], help="one competitor's strategy card")
     s.add_argument("agent_id")
     s.set_defaults(func=cmd_card)
+
+    s = sub.add_parser("run", parents=[common], help="run the whole arena outside the chat, with claude -p")
+    s.add_argument("--parallel", type=int, default=DEFAULT_PARALLEL, help="jobs at once (default 10)")
+    s.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="seconds per job (default 1200)")
+    s.add_argument("--claude", help="the claude CLI (default: $ARENA_CLAUDE, then claude on PATH)")
+    s.set_defaults(func=cmd_run)
     return p
 
 

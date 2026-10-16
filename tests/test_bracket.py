@@ -548,6 +548,112 @@ class Briefs(TempDir):
                     self.assertNotIn("model:", out)
 
 
+FAKE_CLAUDE = r'''#!%(python)s
+"""Stands in for the claude CLI: writes what a real sub-agent would for the job in the brief."""
+import json, os, re, sys
+sys.path.insert(0, %(skill)r)
+import bracket as B
+argv = sys.argv[1:]
+if "--help" in argv:
+    flags = [f for f in B.NEEDED_FLAGS if f != os.environ.get("FAKE_LACK")]
+    print("Options:\n" + "\n".join("  %%s <x>" %% f for f in flags))
+    sys.exit(0)
+brief = re.match(r"Read (\S+) and follow", argv[argv.index("-p") + 1]).group(1)
+d = brief.split(os.sep + "prompts" + os.sep)[0]
+job_id = os.path.basename(brief)[:-3]
+with open(os.environ["FAKE_LOG"], "a") as fh:
+    fh.write(json.dumps({"job": job_id, "argv": argv, "cwd": os.getcwd()}) + "\n")
+if any(p and p in job_id for p in os.environ.get("FAKE_FAIL", "").split(",")):
+    sys.exit(1)
+state = json.load(open(os.path.join(d, "arena.json")))
+job = next(j for ph in B.PHASES for j in B.phase_jobs(state, ph) if j["id"] == job_id)
+def put(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w").write(text)
+s = {k: 7 for k, _ in state["weights"]}
+if job["kind"] == "competitor":
+    put(job["outputs"][0], "solution by %%s" %% job["agent"])
+elif job["kind"] == "attacker":
+    put(job["outputs"][0], "ATTACK 1 [MINOR] short\n")
+elif job["kind"] == "defender":
+    put(job["outputs"][0], "ATTACK 1: CONCEDE. ok\n")
+    put(job["outputs"][1], "revised by %%s" %% job["agent"])
+elif job["kind"] == "judge":
+    put(job["outputs"][0], json.dumps({"scores": {job["a"]: dict(s, correctness=9), job["b"]: s}, "winner": job["a"]}))
+else:
+    put(job["outputs"][0], json.dumps({"scores": {"X": dict(s, correctness=9), "Y": s}, "winner": "X"}))
+print(json.dumps([{"type": "system"}, {"type": "result", "total_cost_usd": 0.01, "permission_denials": []}]))
+'''
+
+
+class HeadlessRun(TempDir):
+    """bracket.py run, with a fake claude CLI."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake = os.path.join(self.tmp, "claude")
+        write(self.fake, FAKE_CLAUDE % {"python": sys.executable, "skill": SKILL})
+        os.chmod(self.fake, 0o755)
+        self.log = os.path.join(self.tmp, "calls.jsonl")
+        self.d = os.path.join(self.tmp, "run")
+
+    def run_arena(self, *init, fail="", lack=""):
+        if not os.path.exists(os.path.join(self.d, "arena.json")):
+            self.ok("init", "--seed", 3, "--task", "t", "--dir", self.d, *init)
+        env = dict(os.environ, FAKE_LOG=self.log, FAKE_FAIL=fail, FAKE_LACK=lack)
+        return subprocess.run([sys.executable, BRACKET, "run", "--dir", self.d, "--claude", self.fake, "--parallel", "4"],
+                              capture_output=True, text=True, env=env)
+
+    def calls(self):
+        with open(self.log) as fh:
+            return [json.loads(line) for line in fh]
+
+    def test_runs_every_phase_to_a_champion(self):
+        base = os.path.join(self.tmp, "old.md")
+        write(base, "old answer")
+        r = self.run_arena("--agents", 5, "--baseline-file", base, "--model", "sonnet", "--judge-model", "opus")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("DONE. Sub-agent cost about $0.", r.stdout)
+        state = load(self.d)
+        self.assertTrue(state["champion"])
+        self.assertEqual(state["final"]["result"]["better"], state["final"]["X"])
+        calls = self.calls()
+        self.assertEqual(len(calls), B.plan_totals(5)["calls"] + 1)
+        for c in calls:
+            argv = c["argv"]
+            self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob,Write,WebSearch")
+            self.assertEqual(argv[argv.index("--allowedTools") + 1], "WebSearch Edit(/%s/**)" % self.d)
+            self.assertEqual(argv[argv.index("--permission-prompts") + 1], "none")
+            self.assertIn("--safe-mode", argv)
+            judge = ".judge" in c["job"]
+            self.assertEqual(argv[argv.index("--model") + 1], "opus" if judge else "sonnet", c["job"])
+            self.assertEqual(os.path.realpath(c["cwd"]), os.path.realpath(state["workdir"]))
+        self.assertIn("You run one job", calls[0]["argv"][calls[0]["argv"].index("--append-system-prompt") + 1])
+
+    def test_a_job_that_fails_twice_gets_a_stand_in(self):
+        r = self.run_arena("--agents", 4, fail="a002.spawn")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("got stand-ins: a002.spawn", r.stdout)
+        self.assertEqual([c["job"] for c in self.calls()].count("a002.spawn"), 2)
+        self.assertEqual(read(B.spawn_out(self.d, "a002")), "NO OUTPUT\n")
+        self.assertNotIn("--model", self.calls()[0]["argv"], "no model flag unless one was given")
+
+    def test_a_failing_judge_stops_the_run_and_a_second_run_finishes(self):
+        r = self.run_arena("--agents", 2, fail="judge")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("failed 3 times", r.stderr)
+        self.assertIsNone(load(self.d)["champion"])
+        r = self.run_arena()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(load(self.d)["champion"])
+
+    def test_an_old_cli_is_refused_before_anything_runs(self):
+        r = self.run_arena("--agents", 2, lack="--safe-mode")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("lacks --safe-mode", r.stderr)
+        self.assertFalse(os.path.exists(self.log))
+
+
 class Guards(TempDir):
     def test_init_refuses_to_overwrite_and_bad_sizes(self):
         d = os.path.join(self.tmp, "run")

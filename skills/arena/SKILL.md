@@ -52,6 +52,7 @@ Read the flags out of the request. Everything that is not a flag is the task.
 | `--judge-model M` | The model for judges and the final check. Default: `--model`. |
 | `--seed S` | Fixes the cards and the pairings. Default: random, and recorded. |
 | `--wave W` | Sub-agents per wave. Default 10. Only raise it if the user raised Claude Code's limit. |
+| `--headless` | Run the tournament outside the chat with `ARENA run`, one `claude -p` process per job. See step 4. |
 
 No task text at all means: the task is the user's most recent request in this conversation, and your
 last answer to it is the baseline to beat.
@@ -65,6 +66,8 @@ Run `ARENA plan --agents N` (or `--full`). It prints the rounds, the sub-agent c
   never mentioned the arena: ask once before spending anything. Offer three options: the default
   arena (16 agents, 97 sub-agent calls), `--full` (100 agents, 601 calls), or an ordinary retry. Wait
   for the answer.
+
+With `--headless`, skip the rest of this step: `run` sets the permissions of its own processes.
 
 Sub-agents write their work into `.arena/` in the current directory. In the default permission mode
 that is one approval per file, which is hundreds on a big run. Before the spawn phase, suggest that
@@ -119,6 +122,23 @@ repeats, pairs round 1, and writes `arena.json`.
 
 ## Step 4: the loop
 
+**With `--headless`:** run `ARENA run` once, as a background Bash command, from the directory you
+ran `init` in. Tell the user it started and will take a while, then wait for the notice that it
+exited. Do not poll it. It drives every phase below by itself, 10 `claude -p` processes at a time,
+reruns a failed job once and writes stand-ins after that, exactly as `fail` does.
+
+- Exit 0: it printed DONE. Go to step 5.
+- Exit 2 on start: the `claude` CLI is missing or too old. Tell the user, and run the loop below in
+  the chat instead. It picks up the same state.
+- Exit 2 later: a judge failed three times. `ARENA run` again continues where it stopped.
+
+Its processes start with `--safe-mode`, so they see their brief and nothing else: no CLAUDE.md, no
+plugins, no MCP servers. They can read inside the project and the run folder and search the web,
+and can write only inside the run folder. Anything else is refused, because nobody is there to
+approve it.
+
+Without `--headless`, run the loop in the chat:
+
 Always drive it with `ARENA next`. It reads the state on disk and tells you the next step and the
 exact command.
 
@@ -172,6 +192,8 @@ solution file you read in the whole run. Give the user:
 4. **Against the answer you rejected**, if there was one: the final check's scores, honestly. If the
    old answer scored higher, say so plainly and show both.
 5. Where the full record lives: the run folder.
+6. With `--headless`: the cost line `run` printed, and every job it says was refused a tool call or
+   got a stand-in.
 
 If the solution changes files in the user's project, do not apply it. Ask: apply it, or change it?
 

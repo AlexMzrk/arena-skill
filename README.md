@@ -72,6 +72,7 @@ answer, make them compete". When it starts itself like that, it asks before it s
 | `--judge-model M` | The model for the judges only. Default: `--model`. |
 | `--seed S` | Same seed, same cards and same bracket. Default random, and recorded. |
 | `--wave W` | Sub-agents per wave. Default 10. Only raise it if you raised Claude Code's limit. |
+| `--headless` | Run the tournament outside the chat, one `claude -p` process per job. See below. |
 
 ## How it works
 
@@ -163,6 +164,7 @@ python3 bracket.py record r3-m07 a042 --reason "..."   # or record one by hand
 python3 bracket.py advance                  # eliminate the losers, pair the survivors
 python3 bracket.py status                   # alive and eliminated, per round
 python3 bracket.py winner                   # the survivor, the attacks it survived, the rounds
+python3 bracket.py run --parallel 10        # the whole arena outside the chat, with claude -p
 ```
 
 The tests run a full 100-agent tournament through that command line with random winners and check
@@ -193,6 +195,17 @@ attacks it survived, and why it tells you straight when the answer you rejected 
 default (the `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY` setting), so the arena runs in waves of 10. The
 spawn is 10 waves, the whole 100-agent run is 70, and it takes a while. If you raise that limit,
 pass `--wave` to match.
+
+**`--headless` runs the arena outside the chat.** `bracket.py run` drives every phase itself and
+starts one `claude -p` process per job, 10 at a time, so the chat sees one command instead of
+hundreds of sub-agent calls: no waves, no permission prompts, no compacted context. Each process
+starts with `--safe-mode` (no CLAUDE.md, plugins, hooks or MCP servers: the brief is all it knows),
+gets only Read, Grep, Glob, Write and WebSearch, may write only inside the run folder, and has every
+other permission request refused, since nobody is there to answer it. A failed job is run once more
+and then gets a stand-in; a judge gets three tries, and if it still fails, `run` stops and running it
+again picks up where it left off. At the end it prints what the run would cost at API prices, and
+names any job that was refused a tool call. It needs the `claude` CLI on your PATH, logged in
+(`--claude <path>` or `ARENA_CLAUDE` points it elsewhere).
 
 **Expect permission prompts unless you allow `.arena/`.** Every sub-agent writes a file into
 `.arena/`, and in the default permission mode that is one approval per file. Add the allow rule
